@@ -1,0 +1,25 @@
+"""Общие зависимости: сессия БД, текущий пользователь (JWT), скоуп тенанта."""
+from typing import Annotated
+
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import decode_token
+from app.db.session import get_session
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+async def get_current_user(authorization: Annotated[str | None, Header()] = None) -> dict:
+    """Декодирует access-JWT из заголовка Authorization. TODO: подгружать User из БД и tenant_id."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = decode_token(token)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from exc
+    return payload
+
+
+CurrentUser = Annotated[dict, Depends(get_current_user)]
