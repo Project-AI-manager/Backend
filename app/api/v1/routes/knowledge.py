@@ -2,6 +2,8 @@
 from fastapi import APIRouter
 
 from app.api.deps import CurrentUser
+from app.api.v1.routes.ml import answer_message
+from app.schemas.ml import MLAnswerRequest, MLAnswerResponse
 
 router = APIRouter()
 
@@ -16,9 +18,10 @@ async def upload_document(user: CurrentUser) -> dict:
     raise NotImplementedError  # TODO: загрузка в S3 → задача индексации (ARQ)
 
 
-@router.post("/ask")
-async def ask(question: str, user: CurrentUser) -> dict:
-    raise NotImplementedError  # TODO: playground — RAG-ответ + источники + уверенность
+@router.post("/ask", response_model=MLAnswerResponse)
+async def ask(body: MLAnswerRequest, user: CurrentUser) -> MLAnswerResponse:
+    """Knowledge playground: same ML flow, exposed under knowledge for the UI."""
+    return await answer_message(body, user)
 
 
 @router.get("/candidates")
