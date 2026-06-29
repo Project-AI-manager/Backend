@@ -15,7 +15,7 @@ class Tenant(Base, UUIDMixin, TimestampMixin):
 
 
 class TenantAIConfig(Base, TimestampMixin):
-    """Настройки AI тенанта (1:1). Порог уверенности и авто-ответ — инструмент онбординга доверия."""
+    """Настройки AI тенанта."""
     __tablename__ = "tenant_ai_config"
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), primary_key=True)
     auto_reply_enabled: Mapped[bool] = mapped_column(Boolean, default=False)

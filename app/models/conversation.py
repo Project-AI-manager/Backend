@@ -3,10 +3,9 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDMixin
+from app.db.base import Base, JsonDict, TimestampMixin, UUIDMixin
 
 
 class Customer(Base, UUIDMixin, TimestampMixin):
@@ -20,7 +19,11 @@ class CustomerIdentity(Base, UUIDMixin):
     """Привязка клиента к id в конкретном канале (узнаём человека across каналов)."""
     __tablename__ = "customer_identity"
     __table_args__ = (
-        UniqueConstraint("channel_id", "external_user_id", name="uq_customer_identity_channel_external_user"),
+        UniqueConstraint(
+            "channel_id",
+            "external_user_id",
+            name="uq_customer_identity_channel_external_user",
+        ),
     )
 
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer.id"), index=True)
@@ -33,7 +36,8 @@ class Conversation(Base, UUIDMixin, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer.id"))
     channel_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("channel.id"))
-    status: Mapped[str] = mapped_column(String(16), default="open")  # open|auto|escalated|closed|snoozed
+    # open|auto|escalated|closed|snoozed
+    status: Mapped[str] = mapped_column(String(16), default="open")
     assignee_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("user.id"), nullable=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_message_preview: Mapped[str] = mapped_column(String(512), default="")
@@ -43,7 +47,11 @@ class Conversation(Base, UUIDMixin, TimestampMixin):
 class Message(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "message"
     __table_args__ = (
-        UniqueConstraint("conversation_id", "external_message_id", name="uq_message_conversation_external"),
+        UniqueConstraint(
+            "conversation_id",
+            "external_message_id",
+            name="uq_message_conversation_external",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
@@ -52,8 +60,9 @@ class Message(Base, UUIDMixin, TimestampMixin):
     sender_type: Mapped[str] = mapped_column(String(16))  # customer|ai|manager|system
     sender_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("user.id"), nullable=True)
     text: Mapped[str] = mapped_column(Text, default="")
-    attachments: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attachments: Mapped[dict] = mapped_column(JsonDict, default=dict)
     external_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(16), default="received")  # received|pending|sent|failed
+    # received|pending|sent|failed
+    status: Mapped[str] = mapped_column(String(16), default="received")
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    ai_meta: Mapped[dict] = mapped_column(JSONB, default=dict)  # использованные чанки, модель
+    ai_meta: Mapped[dict] = mapped_column(JsonDict, default=dict)  # использованные чанки, модель

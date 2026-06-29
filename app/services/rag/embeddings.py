@@ -1,8 +1,6 @@
 """Эмбеддинги за интерфейсом. Старт — локальная модель (multilingual-e5), без внешних доступов."""
 from abc import ABC, abstractmethod
 
-from app.core.config import settings
-
 VECTOR_DIM = 1024  # multilingual-e5-large
 
 
