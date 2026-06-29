@@ -1,4 +1,6 @@
 """Общие зависимости: сессия БД, текущий пользователь (JWT), скоуп тенанта."""
+
+import uuid
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
@@ -25,3 +27,14 @@ async def get_current_user(authorization: Annotated[str | None, Header()] = None
 
 
 CurrentUser = Annotated[dict, Depends(get_current_user)]
+
+
+def tenant_id_from_user(user: dict) -> uuid.UUID:
+    """Return the trusted tenant scope stored in the access token."""
+    raw_tenant_id = user.get("tenant_id")
+    if not raw_tenant_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Tenant is required")
+    try:
+        return uuid.UUID(str(raw_tenant_id))
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid tenant id") from exc

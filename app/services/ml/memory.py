@@ -1,16 +1,17 @@
-"""Company memory retrieval for the first ML module iteration.
+"""Tenant-aware company memory retrieval without external ML services."""
 
-Today this is a deterministic keyword retriever so the whole ML flow can be
-tested without Qdrant, Postgres or external API keys. Later we can replace the
-retriever implementation with Qdrant-backed vector search while keeping the
-orchestrator and API contract stable.
-"""
 from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
+from collections.abc import Iterable
+from uuid import UUID
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.knowledge import KbChunk, KbDocument
 from app.services.ml.contracts import MemorySnippet
 
 TOKEN_RE = re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9]+")
@@ -46,7 +47,7 @@ class MemoryRetriever(ABC):
     async def retrieve(
         self,
         *,
-        tenant_id: str,
+        tenant_id: UUID,
         query: str,
         limit: int = 4,
     ) -> list[MemorySnippet]: ...
@@ -61,37 +62,86 @@ def tokenize(text: str) -> Counter[str]:
 
 
 class KeywordMemoryRetriever(MemoryRetriever):
-    """Small local REC/RAG-like memory used before Qdrant is connected."""
+    """Deterministic in-memory retriever for unit tests and local experiments."""
 
     def __init__(self, snippets: list[MemorySnippet] | None = None) -> None:
-        self.snippets = snippets or default_sales_memory()
+        self.snippets = default_sales_memory() if snippets is None else snippets
 
-    async def retrieve(self, *, tenant_id: str, query: str, limit: int = 4) -> list[MemorySnippet]:
-        query_tokens = tokenize(query)
-        if not query_tokens:
-            return []
+    async def retrieve(
+        self,
+        *,
+        tenant_id: UUID,
+        query: str,
+        limit: int = 4,
+    ) -> list[MemorySnippet]:
+        return rank_snippets(self.snippets, query=query, limit=limit)
 
-        scored: list[MemorySnippet] = []
-        for snippet in self.snippets:
-            text_tokens = tokenize(
-                f"{snippet.title} {snippet.text} {' '.join(snippet.tags.values())}"
+
+class DatabaseMemoryRetriever(MemoryRetriever):
+    """Retrieve and rank ready knowledge-base chunks inside one tenant."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def retrieve(
+        self,
+        *,
+        tenant_id: UUID,
+        query: str,
+        limit: int = 4,
+    ) -> list[MemorySnippet]:
+        result = await self.session.execute(
+            select(KbChunk, KbDocument.title)
+            .join(KbDocument, KbDocument.id == KbChunk.document_id)
+            .where(
+                KbChunk.tenant_id == tenant_id,
+                KbDocument.tenant_id == tenant_id,
+                KbDocument.status == "ready",
             )
-            overlap = sum((query_tokens & text_tokens).values())
-            if overlap <= 0:
-                continue
-            score = min(1.0, overlap / max(3, len(query_tokens)))
-            scored.append(
-                MemorySnippet(
-                    id=snippet.id,
-                    title=snippet.title,
-                    text=snippet.text,
-                    score=round(score, 3),
-                    source=snippet.source,
-                    tags=snippet.tags,
-                )
+        )
+        snippets = [
+            MemorySnippet(
+                id=str(chunk.id),
+                title=title,
+                text=chunk.text,
+                score=1.0,
+                source="knowledge-base",
+                tags={str(key): str(value) for key, value in (chunk.tags or {}).items()},
             )
+            for chunk, title in result.all()
+        ]
+        return rank_snippets(snippets, query=query, limit=limit)
 
-        return sorted(scored, key=lambda item: item.score, reverse=True)[:limit]
+
+def rank_snippets(
+    snippets: Iterable[MemorySnippet],
+    *,
+    query: str,
+    limit: int,
+) -> list[MemorySnippet]:
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
+    scored: list[MemorySnippet] = []
+    for snippet in snippets:
+        text_tokens = tokenize(f"{snippet.title} {snippet.text} {' '.join(snippet.tags.values())}")
+        overlap = sum((query_tokens & text_tokens).values())
+        if overlap <= 0:
+            continue
+        score = min(1.0, overlap / max(1, sum(query_tokens.values())))
+        scored.append(
+            MemorySnippet(
+                id=snippet.id,
+                title=snippet.title,
+                text=snippet.text,
+                score=round(score, 3),
+                source=snippet.source,
+                tags=snippet.tags,
+            )
+        )
+
+    return sorted(scored, key=lambda item: item.score, reverse=True)[:limit]
 
 
 def default_sales_memory() -> list[MemorySnippet]:

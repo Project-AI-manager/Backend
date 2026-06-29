@@ -1,6 +1,7 @@
 """ML message service: API/worker friendly orchestration entrypoint."""
+
 from app.services.confidence import compute_confidence, should_auto_reply
-from app.services.ml.contracts import MemorySnippet, MLAnswerInput, MLAnswerResult
+from app.services.ml.contracts import Decision, MemorySnippet, MLAnswerInput, MLAnswerResult
 from app.services.ml.memory import KeywordMemoryRetriever, MemoryRetriever
 from app.services.ml.prompts import build_prompt
 from app.services.rag.llm import LLMProvider, get_llm
@@ -15,10 +16,11 @@ class MLMessageService:
         retriever: MemoryRetriever | None = None,
         llm: LLMProvider | None = None,
     ) -> None:
-        self.retriever = retriever or KeywordMemoryRetriever()
+        self.retriever = retriever or KeywordMemoryRetriever(snippets=[])
         self.llm = llm or get_llm()
 
     async def answer(self, request: MLAnswerInput) -> MLAnswerResult:
+        recent_history = request.history[-8:]
         memory = list(request.memory_override) or await self.retriever.retrieve(
             tenant_id=request.tenant_id,
             query=request.message,
@@ -27,21 +29,28 @@ class MLMessageService:
             message=request.message,
             profile=request.profile,
             memory=memory,
-            history=request.history,
+            history=recent_history,
             custom_system_prompt=request.custom_system_prompt,
         )
         answer_text = await self.llm.generate(
             prompt.user_prompt,
             [snippet.text for snippet in memory],
             system_prompt=prompt.system_prompt,
-            history=[f"{turn.role}: {turn.text}" for turn in request.history],
+            history=[f"{turn.role}: {turn.text}" for turn in recent_history],
         )
         confidence = self._confidence(memory=memory, answer_text=answer_text)
-        can_auto_reply = request.auto_reply_enabled and should_auto_reply(
-            confidence,
-            request.confidence_threshold,
+        can_auto_reply = (
+            request.auto_reply_enabled
+            and bool(memory)
+            and bool(answer_text.strip())
+            and confidence > 0
+            and not self._requires_manager(memory)
+            and should_auto_reply(
+                confidence,
+                request.confidence_threshold,
+            )
         )
-        decision = "auto_reply" if can_auto_reply else "escalate"
+        decision: Decision = "auto_reply" if can_auto_reply else "escalate"
         return MLAnswerResult(
             answer=answer_text,
             confidence=confidence,
@@ -62,4 +71,10 @@ class MLMessageService:
             retrieval_score=retrieval_score,
             coverage=coverage,
             generation_ok=generation_ok,
+        )
+
+    @staticmethod
+    def _requires_manager(memory: list[MemorySnippet]) -> bool:
+        return any(
+            snippet.tags.get("risk", "").casefold() in {"manager", "escalate"} for snippet in memory
         )

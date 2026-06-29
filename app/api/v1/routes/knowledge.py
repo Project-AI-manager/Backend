@@ -2,9 +2,9 @@
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
 from app.api.v1.routes.ml import answer_message
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
@@ -23,22 +23,12 @@ from app.services.knowledge import (
 router = APIRouter()
 
 
-def _tenant_id(user: CurrentUser) -> uuid.UUID:
-    raw_tenant_id = user.get("tenant_id")
-    if not raw_tenant_id:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Tenant is required")
-    try:
-        return uuid.UUID(str(raw_tenant_id))
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid tenant id") from exc
-
-
 @router.get("/documents", response_model=list[KnowledgeDocumentResponse])
 async def list_documents(
     user: CurrentUser,
     session: SessionDep,
 ) -> list[KnowledgeDocumentResponse]:
-    return await list_kb_documents(session, _tenant_id(user))
+    return await list_kb_documents(session, tenant_id_from_user(user))
 
 
 @router.post("/documents", response_model=KnowledgeDocumentResponse)
@@ -47,13 +37,17 @@ async def upload_document(
     user: CurrentUser,
     session: SessionDep,
 ) -> KnowledgeDocumentResponse:
-    return await create_kb_document(session, _tenant_id(user), body)
+    return await create_kb_document(session, tenant_id_from_user(user), body)
 
 
 @router.post("/ask", response_model=MLAnswerResponse)
-async def ask(body: MLAnswerRequest, user: CurrentUser) -> MLAnswerResponse:
+async def ask(
+    body: MLAnswerRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> MLAnswerResponse:
     """Knowledge playground: same ML flow, exposed under knowledge for the UI."""
-    return await answer_message(body, user)
+    return await answer_message(body, user, session)
 
 
 @router.get("/candidates", response_model=list[KnowledgeCandidateResponse])
@@ -61,7 +55,7 @@ async def list_candidates(
     user: CurrentUser,
     session: SessionDep,
 ) -> list[KnowledgeCandidateResponse]:
-    return await list_kb_candidates(session, _tenant_id(user))
+    return await list_kb_candidates(session, tenant_id_from_user(user))
 
 
 @router.post("/candidates/{candidate_id}/approve", response_model=KnowledgeCandidateApproveResponse)
@@ -70,4 +64,8 @@ async def approve_candidate(
     user: CurrentUser,
     session: SessionDep,
 ) -> KnowledgeCandidateApproveResponse:
-    return await approve_kb_candidate(session, _tenant_id(user), candidate_id)
+    return await approve_kb_candidate(
+        session,
+        tenant_id_from_user(user),
+        candidate_id,
+    )

@@ -1,11 +1,12 @@
-"""LLM-провайдеры за единым интерфейсом — отделённый AI-слой (см. system-architecture).
+"""LLM providers behind one interface, with deterministic mock mode by default."""
 
-Старт на заглушке MockLLM (доступов к YandexGPT/GigaChat пока нет).
-"""
-import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
+
+
+class LLMProviderConfigurationError(RuntimeError):
+    """Raised before generation when the configured provider cannot be used."""
 
 
 class LLMProvider(ABC):
@@ -23,6 +24,8 @@ class LLMProvider(ABC):
 
 
 class MockLLM(LLMProvider):
+    """Grounded deterministic response generator used without API keys."""
+
     provider_name = "mock"
 
     async def generate(
@@ -33,40 +36,14 @@ class MockLLM(LLMProvider):
         system_prompt: str = "",
         history: list[str] | None = None,
     ) -> str:
-        customer_question = self._extract_customer_question(prompt)
-        question_lc = customer_question.lower()
-        if not context:
+        clean_context = [item.strip() for item in context if item.strip()]
+        if not clean_context:
             return (
                 "Спасибо за вопрос. Сейчас у меня недостаточно данных в базе знаний, "
                 "поэтому я передам обращение менеджеру для точного ответа."
             )
-
-        joined_context = " ".join(context)
-        if any(word in question_lc for word in ("рассроч", "кредит", "без переплат")):
-            return (
-                "По рассрочке нужно уточнить актуальные условия у менеджера: они зависят "
-                "от текущей акции и банка-партнёра. Я передам вопрос специалисту."
-            )
-        if any(word in question_lc for word in ("iphone", "айфон", "налич", "цена")):
-            return (
-                "Да, iPhone 15 128ГБ есть в наличии в чёрном и синем цветах. "
-                "Цена — 79 990 ₽. По Казани доступна доставка в день заказа."
-            )
-        if "достав" in question_lc:
-            return (
-                "Доставка по Казани доступна в день заказа, если оформить заказ до 17:00. "
-                "Также можно забрать заказ самовывозом до 20:00."
-            )
-        return f"По базе знаний: {joined_context[:400]}"
-
-    @staticmethod
-    def _extract_customer_question(prompt: str) -> str:
-        match = re.search(
-            r"Вопрос клиента:\s*(?P<question>.*?)(?:\n\n|Сформируй ответ клиенту|$)",
-            prompt,
-            flags=re.DOTALL,
-        )
-        return match.group("question").strip() if match else prompt
+        joined_context = " ".join(clean_context)
+        return f"По базе знаний компании: {joined_context[:600]}"
 
 
 class YandexGPTProvider(LLMProvider):
@@ -97,7 +74,12 @@ class GigaChatProvider(LLMProvider):
         raise NotImplementedError  # TODO: вызов GigaChat через httpx
 
 
-def get_llm() -> LLMProvider:
-    return {"yandexgpt": YandexGPTProvider, "gigachat": GigaChatProvider}.get(
-        settings.LLM_PROVIDER, MockLLM
-    )()
+def get_llm(provider_name: str | None = None) -> LLMProvider:
+    configured_name = (provider_name or settings.LLM_PROVIDER).strip().lower()
+    if configured_name == "mock":
+        return MockLLM()
+    if configured_name in {"yandexgpt", "gigachat"}:
+        raise LLMProviderConfigurationError(
+            f"LLM provider '{configured_name}' is not available in local mock mode"
+        )
+    raise LLMProviderConfigurationError(f"Unsupported LLM provider '{configured_name}'")
