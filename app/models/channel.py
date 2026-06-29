@@ -1,4 +1,5 @@
-"""Каналы (web|avito|vk|max) и сырые вебхуки для идемпотентности. См. channel-integrations."""
+"""Каналы (telegram|web|avito|vk|max) и сырые вебхуки для идемпотентности."""
+
 import uuid
 
 from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
@@ -19,6 +20,7 @@ class Channel(Base, UUIDMixin, TimestampMixin):
 
 class WebhookEvent(Base, UUIDMixin, TimestampMixin):
     """Сырое входящее событие канала — дедуп по (channel, external_event_id)."""
+
     __tablename__ = "webhook_event"
     __table_args__ = (
         UniqueConstraint(
