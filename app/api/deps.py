@@ -19,6 +19,8 @@ async def get_current_user(authorization: Annotated[str | None, Header()] = None
         payload = decode_token(token)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from exc
+    if payload.get("type") != "access":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token type")
     return payload
 
 
