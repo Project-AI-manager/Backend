@@ -1,12 +1,13 @@
 """Alembic env (async). URL и метаданные берём из приложения."""
+
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import app.models  # noqa: F401  — наполняет Base.metadata
+from alembic import context
 from app.core.config import settings
 from app.db.base import Base
 
@@ -19,7 +20,9 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=settings.DATABASE_URL, target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=settings.DATABASE_URL, target_metadata=target_metadata, literal_binds=True
+    )
     with context.begin_transaction():
         context.run_migrations()
 

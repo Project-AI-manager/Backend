@@ -4,11 +4,13 @@ Revision ID: 20260623_0001
 Revises:
 Create Date: 2026-06-23
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision: str = "20260623_0001"
 down_revision: str | None = None
@@ -22,8 +24,18 @@ def uuid_pk() -> sa.Column:
 
 def timestamps() -> tuple[sa.Column, sa.Column]:
     return (
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
     )
 
 
@@ -52,7 +64,13 @@ def upgrade() -> None:
 
     op.create_table(
         "tenant_ai_config",
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), primary_key=True, nullable=False),
+        sa.Column(
+            "tenant_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("tenant.id"),
+            primary_key=True,
+            nullable=False,
+        ),
         sa.Column("auto_reply_enabled", sa.Boolean(), nullable=False),
         sa.Column("confidence_threshold", sa.Integer(), nullable=False),
         sa.Column("llm_provider", sa.String(length=32), nullable=False),
@@ -64,7 +82,9 @@ def upgrade() -> None:
     op.create_table(
         "user",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
         sa.Column("email", sa.String(length=320), nullable=False),
         sa.Column("full_name", sa.String(length=255), nullable=False),
         sa.Column("role", sa.String(length=16), nullable=False),
@@ -78,7 +98,9 @@ def upgrade() -> None:
     op.create_table(
         "channel",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
         sa.Column("type", sa.String(length=16), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
@@ -91,7 +113,9 @@ def upgrade() -> None:
     op.create_table(
         "customer",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
         sa.Column("display_name", sa.String(length=255), nullable=False),
         sa.Column("note", sa.Text(), nullable=False),
         *timestamps(),
@@ -101,7 +125,9 @@ def upgrade() -> None:
     op.create_table(
         "kb_document",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
         sa.Column("title", sa.String(length=512), nullable=False),
         sa.Column("source_type", sa.String(length=16), nullable=False),
         sa.Column("storage_url", sa.String(length=1024), nullable=True),
@@ -114,8 +140,12 @@ def upgrade() -> None:
     op.create_table(
         "subscription",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("plan_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("plan.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "plan_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("plan.id"), nullable=False
+        ),
         sa.Column("status", sa.String(length=16), nullable=False),
         *timestamps(),
     )
@@ -124,7 +154,9 @@ def upgrade() -> None:
     op.create_table(
         "usage_counter",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
         sa.Column("period", sa.String(length=7), nullable=False),
         sa.Column("dialogs_count", sa.Integer(), nullable=False),
         sa.Column("ai_replies_count", sa.Integer(), nullable=False),
@@ -135,7 +167,9 @@ def upgrade() -> None:
     op.create_table(
         "refresh_token",
         uuid_pk(),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=False),
+        sa.Column(
+            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=False
+        ),
         sa.Column("token_hash", sa.String(length=255), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
@@ -147,12 +181,16 @@ def upgrade() -> None:
     op.create_table(
         "webhook_event",
         uuid_pk(),
-        sa.Column("channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False),
+        sa.Column(
+            "channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False
+        ),
         sa.Column("external_event_id", sa.String(length=255), nullable=False),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("processed", sa.Boolean(), nullable=False),
         *timestamps(),
-        sa.UniqueConstraint("channel_id", "external_event_id", name="uq_webhook_event_channel_external"),
+        sa.UniqueConstraint(
+            "channel_id", "external_event_id", name="uq_webhook_event_channel_external"
+        ),
     )
     op.create_index("ix_webhook_event_channel_id", "webhook_event", ["channel_id"])
     op.create_index("ix_webhook_event_external_event_id", "webhook_event", ["external_event_id"])
@@ -160,23 +198,48 @@ def upgrade() -> None:
     op.create_table(
         "customer_identity",
         uuid_pk(),
-        sa.Column("customer_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("customer.id"), nullable=False),
-        sa.Column("channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False),
+        sa.Column(
+            "customer_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("customer.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False
+        ),
         sa.Column("external_user_id", sa.String(length=255), nullable=False),
-        sa.UniqueConstraint("channel_id", "external_user_id", name="uq_customer_identity_channel_external_user"),
+        sa.UniqueConstraint(
+            "channel_id", "external_user_id", name="uq_customer_identity_channel_external_user"
+        ),
     )
     op.create_index("ix_customer_identity_customer_id", "customer_identity", ["customer_id"])
     op.create_index("ix_customer_identity_channel_id", "customer_identity", ["channel_id"])
-    op.create_index("ix_customer_identity_external_user_id", "customer_identity", ["external_user_id"])
+    op.create_index(
+        "ix_customer_identity_external_user_id", "customer_identity", ["external_user_id"]
+    )
 
     op.create_table(
         "conversation",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("customer_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("customer.id"), nullable=False),
-        sa.Column("channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "customer_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("customer.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "channel_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("channel.id"), nullable=False
+        ),
         sa.Column("status", sa.String(length=16), nullable=False),
-        sa.Column("assignee_user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=True),
+        sa.Column(
+            "assignee_user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("user.id"),
+            nullable=True,
+        ),
         sa.Column("last_message_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_message_preview", sa.String(length=512), nullable=False),
         sa.Column("unread_count", sa.Integer(), nullable=False),
@@ -187,8 +250,15 @@ def upgrade() -> None:
     op.create_table(
         "kb_chunk",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("document_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("kb_document.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "document_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("kb_document.id"),
+            nullable=False,
+        ),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("position", sa.Integer(), nullable=False),
         sa.Column("token_count", sa.Integer(), nullable=False),
@@ -196,7 +266,9 @@ def upgrade() -> None:
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         *timestamps(),
-        sa.UniqueConstraint("document_id", "position", "version", name="uq_kb_chunk_document_position_version"),
+        sa.UniqueConstraint(
+            "document_id", "position", "version", name="uq_kb_chunk_document_position_version"
+        ),
     )
     op.create_index("ix_kb_chunk_tenant_id", "kb_chunk", ["tenant_id"])
     op.create_index("ix_kb_chunk_document_id", "kb_chunk", ["document_id"])
@@ -204,11 +276,20 @@ def upgrade() -> None:
     op.create_table(
         "message",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("conversation_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("conversation.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "conversation_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("conversation.id"),
+            nullable=False,
+        ),
         sa.Column("direction", sa.String(length=8), nullable=False),
         sa.Column("sender_type", sa.String(length=16), nullable=False),
-        sa.Column("sender_user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=True),
+        sa.Column(
+            "sender_user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=True
+        ),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("attachments", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("external_message_id", sa.String(length=255), nullable=True),
@@ -216,7 +297,9 @@ def upgrade() -> None:
         sa.Column("confidence", sa.Float(), nullable=True),
         sa.Column("ai_meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         *timestamps(),
-        sa.UniqueConstraint("conversation_id", "external_message_id", name="uq_message_conversation_external"),
+        sa.UniqueConstraint(
+            "conversation_id", "external_message_id", name="uq_message_conversation_external"
+        ),
     )
     op.create_index("ix_message_tenant_id", "message", ["tenant_id"])
     op.create_index("ix_message_conversation_id", "message", ["conversation_id"])
@@ -225,13 +308,25 @@ def upgrade() -> None:
     op.create_table(
         "kb_candidate",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("conversation_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("conversation.id"), nullable=False),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "conversation_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("conversation.id"),
+            nullable=False,
+        ),
         sa.Column("question", sa.Text(), nullable=False),
         sa.Column("answer", sa.Text(), nullable=False),
         sa.Column("suggested_by", sa.String(length=16), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
-        sa.Column("resulting_document_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("kb_document.id"), nullable=True),
+        sa.Column(
+            "resulting_document_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("kb_document.id"),
+            nullable=True,
+        ),
         *timestamps(),
     )
     op.create_index("ix_kb_candidate_tenant_id", "kb_candidate", ["tenant_id"])
@@ -239,13 +334,24 @@ def upgrade() -> None:
     op.create_table(
         "escalation",
         uuid_pk(),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False),
-        sa.Column("conversation_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("conversation.id"), nullable=False),
-        sa.Column("message_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("message.id"), nullable=True),
+        sa.Column(
+            "tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenant.id"), nullable=False
+        ),
+        sa.Column(
+            "conversation_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("conversation.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "message_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("message.id"), nullable=True
+        ),
         sa.Column("reason", sa.String(length=24), nullable=False),
         sa.Column("confidence", sa.Float(), nullable=True),
         sa.Column("status", sa.String(length=16), nullable=False),
-        sa.Column("resolved_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=True),
+        sa.Column(
+            "resolved_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("user.id"), nullable=True
+        ),
         *timestamps(),
     )
     op.create_index("ix_escalation_tenant_id", "escalation", ["tenant_id"])

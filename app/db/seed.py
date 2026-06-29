@@ -12,7 +12,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,25 +104,30 @@ def build_demo_summary() -> dict[str, Any]:
     }
 
 
-async def _one_or_none(session: AsyncSession, model: type, **filters: Any) -> Any | None:
+async def _one_or_none[ModelT](
+    session: AsyncSession,
+    model: type[ModelT],
+    **filters: Any,
+) -> ModelT | None:
     result = await session.execute(select(model).filter_by(**filters))
     return result.scalar_one_or_none()
 
 
-async def _upsert_by_id(
+async def _upsert_by_id[ModelT](
     session: AsyncSession,
-    model: type,
+    model: type[ModelT],
     item_id: uuid.UUID,
     values: dict[str, Any],
-) -> tuple[Any, bool]:
+) -> tuple[ModelT, bool]:
     item = await session.get(model, item_id)
     created = item is None
     if created:
-        item = model(id=item_id, **values)
+        item = cast(ModelT, cast(Any, model)(id=item_id, **values))
         session.add(item)
     else:
         for key, value in values.items():
             setattr(item, key, value)
+    item = cast(ModelT, item)
     return item, created
 
 
@@ -132,6 +137,7 @@ async def _upsert_tenant(session: AsyncSession, stats: SeedStats) -> Tenant:
     if created:
         tenant = Tenant(id=DEMO_IDS["tenant"])
         session.add(tenant)
+    tenant = cast(Tenant, tenant)
 
     tenant.name = "ООО Север"
     tenant.slug = "demo-sever"
@@ -146,6 +152,7 @@ async def _upsert_ai_config(session: AsyncSession, tenant: Tenant, stats: SeedSt
     if created:
         config = TenantAIConfig(tenant_id=tenant.id)
         session.add(config)
+    config = cast(TenantAIConfig, config)
 
     config.auto_reply_enabled = False
     config.confidence_threshold = 80
@@ -185,6 +192,7 @@ async def _upsert_users(
         if created:
             user = User(id=user_id)
             session.add(user)
+        user = cast(User, user)
 
         user.tenant_id = tenant.id
         user.email = email
