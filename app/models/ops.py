@@ -2,10 +2,9 @@
 import uuid
 
 from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDMixin
+from app.db.base import Base, JsonDict, TimestampMixin, UUIDMixin
 
 
 class Escalation(Base, UUIDMixin, TimestampMixin):
@@ -26,14 +25,15 @@ class Plan(Base, UUIDMixin):
     price_month: Mapped[int] = mapped_column(Integer, default=0)
     dialog_limit: Mapped[int] = mapped_column(Integer, default=0)
     channel_limit: Mapped[int] = mapped_column(Integer, default=0)
-    features: Mapped[dict] = mapped_column(JSONB, default=dict)
+    features: Mapped[dict] = mapped_column(JsonDict, default=dict)
 
 
 class Subscription(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "subscription"
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
     plan_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plan.id"))
-    status: Mapped[str] = mapped_column(String(16), default="trial")  # trial|active|past_due|canceled
+    # trial|active|past_due|canceled
+    status: Mapped[str] = mapped_column(String(16), default="trial")
 
 
 class UsageCounter(Base, UUIDMixin):

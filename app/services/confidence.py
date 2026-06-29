@@ -4,7 +4,12 @@
 """
 
 
-def compute_confidence(*, retrieval_score: float, coverage: float, generation_ok: bool = True) -> float:
+def compute_confidence(
+    *,
+    retrieval_score: float,
+    coverage: float,
+    generation_ok: bool = True,
+) -> float:
     """Возвращает 0..1. TODO: калибровка весов и сигналов генерации."""
     base = 0.6 * retrieval_score + 0.4 * coverage
     return round(base if generation_ok else base * 0.5, 3)
