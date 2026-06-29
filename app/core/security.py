@@ -1,4 +1,5 @@
 """JWT (access/refresh), хеширование паролей и refresh-token lookup."""
+
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -24,7 +25,7 @@ def verify_password(raw: str, hashed: str) -> bool:
 
 
 def create_token(
-    subject: str,
+    subject: str | uuid.UUID,
     *,
     tenant_id: str | uuid.UUID | None = None,
     role: str | None = None,

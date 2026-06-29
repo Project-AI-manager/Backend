@@ -3,8 +3,10 @@
 The module intentionally does not depend on FastAPI or SQLAlchemy. It describes
 the pure data flow that can be reused by API routes, workers and tests.
 """
+
 from dataclasses import dataclass, field
 from typing import Literal
+from uuid import UUID
 
 Decision = Literal["auto_reply", "escalate"]
 ChatRole = Literal["customer", "manager", "ai", "system"]
@@ -54,7 +56,7 @@ class PromptBundle:
 
 @dataclass(frozen=True)
 class MLAnswerInput:
-    tenant_id: str
+    tenant_id: UUID
     message: str
     history: tuple[ChatTurn, ...] = ()
     profile: AssistantProfile = field(default_factory=AssistantProfile)
@@ -72,4 +74,3 @@ class MLAnswerResult:
     sources: tuple[MemorySnippet, ...]
     provider: str
     prompt: PromptBundle
-
