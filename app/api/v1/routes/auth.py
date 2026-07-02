@@ -2,8 +2,15 @@
 from fastapi import APIRouter
 
 from app.api.deps import SessionDep
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenPair
-from app.services.auth import login_user, refresh_tokens, register_user
+from app.schemas.auth import (
+    LoginRequest,
+    LogoutRequest,
+    LogoutResponse,
+    RefreshRequest,
+    RegisterRequest,
+    TokenPair,
+)
+from app.services.auth import login_user, logout_user, refresh_tokens, register_user
 
 router = APIRouter()
 
@@ -21,3 +28,9 @@ async def login(body: LoginRequest, session: SessionDep) -> TokenPair:
 @router.post("/refresh", response_model=TokenPair)
 async def refresh(body: RefreshRequest, session: SessionDep) -> TokenPair:
     return await refresh_tokens(session, body)
+
+
+@router.post("/logout", response_model=LogoutResponse)
+async def logout(body: LogoutRequest, session: SessionDep) -> LogoutResponse:
+    await logout_user(session, body)
+    return LogoutResponse()
