@@ -28,6 +28,24 @@ class KnowledgeDocumentResponse(BaseModel):
     updated_at: datetime
 
 
+class KnowledgeChunkResponse(BaseModel):
+    id: UUID
+    document_id: UUID
+    text: str
+    position: int
+    token_count: int
+    tags: dict[str, str]
+    version: int
+
+
+class KnowledgeDocumentDetailResponse(KnowledgeDocumentResponse):
+    chunks: list[KnowledgeChunkResponse]
+
+
+class KnowledgeDocumentStatusResponse(BaseModel):
+    document: KnowledgeDocumentResponse
+
+
 class KnowledgeCandidateResponse(BaseModel):
     id: UUID
     conversation_id: UUID
@@ -42,3 +60,7 @@ class KnowledgeCandidateResponse(BaseModel):
 
 class KnowledgeCandidateApproveResponse(KnowledgeCandidateResponse):
     document: KnowledgeDocumentResponse | None = None
+
+
+class KnowledgeCandidateStatusResponse(KnowledgeCandidateResponse):
+    pass

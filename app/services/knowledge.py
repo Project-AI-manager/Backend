@@ -15,8 +15,12 @@ from app.models.knowledge import KbCandidate, KbChunk, KbDocument
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
     KnowledgeCandidateResponse,
+    KnowledgeCandidateStatusResponse,
+    KnowledgeChunkResponse,
     KnowledgeDocumentCreate,
+    KnowledgeDocumentDetailResponse,
     KnowledgeDocumentResponse,
+    KnowledgeDocumentStatusResponse,
 )
 
 MAX_CHUNK_CHARS = 1200
@@ -98,6 +102,35 @@ async def create_kb_document(
     return _document_response(document, len(chunks))
 
 
+async def get_kb_document(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> KnowledgeDocumentDetailResponse:
+    document = await _get_document(session, tenant_id, document_id)
+    result = await session.execute(
+        select(KbChunk)
+        .where(KbChunk.tenant_id == tenant_id, KbChunk.document_id == document.id)
+        .order_by(KbChunk.position)
+    )
+    chunks = [_chunk_response(chunk) for chunk in result.scalars().all()]
+    base = _document_response(document, len(chunks))
+    return KnowledgeDocumentDetailResponse(**base.model_dump(), chunks=chunks)
+
+
+async def archive_kb_document(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> KnowledgeDocumentStatusResponse:
+    document = await _get_document(session, tenant_id, document_id)
+    document.status = "archived"
+    await session.commit()
+    await session.refresh(document)
+    chunks_count = await _chunk_count(session, tenant_id, document.id)
+    return KnowledgeDocumentStatusResponse(document=_document_response(document, chunks_count))
+
+
 async def list_kb_candidates(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -155,6 +188,22 @@ async def approve_kb_candidate(
     )
 
 
+async def reject_kb_candidate(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> KnowledgeCandidateStatusResponse:
+    candidate = await session.get(KbCandidate, candidate_id)
+    if not candidate or candidate.tenant_id != tenant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knowledge candidate not found")
+
+    candidate.status = "rejected"
+    await session.commit()
+    await session.refresh(candidate)
+    base = _candidate_response(candidate)
+    return KnowledgeCandidateStatusResponse(**base.model_dump())
+
+
 async def _add_chunks(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -187,6 +236,17 @@ async def _chunk_count(session: AsyncSession, tenant_id: uuid.UUID, document_id:
     return int(result.scalar_one())
 
 
+async def _get_document(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> KbDocument:
+    document = await session.get(KbDocument, document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knowledge document not found")
+    return document
+
+
 def _document_response(document: KbDocument, chunks_count: int) -> KnowledgeDocumentResponse:
     return KnowledgeDocumentResponse(
         id=document.id,
@@ -198,6 +258,18 @@ def _document_response(document: KbDocument, chunks_count: int) -> KnowledgeDocu
         chunks_count=chunks_count,
         created_at=document.created_at,
         updated_at=document.updated_at,
+    )
+
+
+def _chunk_response(chunk: KbChunk) -> KnowledgeChunkResponse:
+    return KnowledgeChunkResponse(
+        id=chunk.id,
+        document_id=chunk.document_id,
+        text=chunk.text,
+        position=chunk.position,
+        token_count=chunk.token_count,
+        tags=chunk.tags,
+        version=chunk.version,
     )
 
 

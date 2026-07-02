@@ -9,15 +9,21 @@ from app.api.v1.routes.ml import answer_message
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
     KnowledgeCandidateResponse,
+    KnowledgeCandidateStatusResponse,
     KnowledgeDocumentCreate,
+    KnowledgeDocumentDetailResponse,
     KnowledgeDocumentResponse,
+    KnowledgeDocumentStatusResponse,
 )
 from app.schemas.ml import MLAnswerRequest, MLAnswerResponse
 from app.services.knowledge import (
     approve_kb_candidate,
+    archive_kb_document,
     create_kb_document,
+    get_kb_document,
     list_kb_candidates,
     list_kb_documents,
+    reject_kb_candidate,
 )
 
 router = APIRouter()
@@ -38,6 +44,24 @@ async def upload_document(
     session: SessionDep,
 ) -> KnowledgeDocumentResponse:
     return await create_kb_document(session, tenant_id_from_user(user), body)
+
+
+@router.get("/documents/{document_id}", response_model=KnowledgeDocumentDetailResponse)
+async def get_document(
+    document_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> KnowledgeDocumentDetailResponse:
+    return await get_kb_document(session, tenant_id_from_user(user), document_id)
+
+
+@router.post("/documents/{document_id}/archive", response_model=KnowledgeDocumentStatusResponse)
+async def archive_document(
+    document_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> KnowledgeDocumentStatusResponse:
+    return await archive_kb_document(session, tenant_id_from_user(user), document_id)
 
 
 @router.post("/ask", response_model=MLAnswerResponse)
@@ -65,6 +89,19 @@ async def approve_candidate(
     session: SessionDep,
 ) -> KnowledgeCandidateApproveResponse:
     return await approve_kb_candidate(
+        session,
+        tenant_id_from_user(user),
+        candidate_id,
+    )
+
+
+@router.post("/candidates/{candidate_id}/reject", response_model=KnowledgeCandidateStatusResponse)
+async def reject_candidate(
+    candidate_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> KnowledgeCandidateStatusResponse:
+    return await reject_kb_candidate(
         session,
         tenant_id_from_user(user),
         candidate_id,
