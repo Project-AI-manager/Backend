@@ -121,6 +121,34 @@ def test_refresh_rotates_refresh_token(client: TestClient) -> None:
     assert reused.status_code == 401
 
 
+def test_logout_revokes_refresh_token(client: TestClient) -> None:
+    tokens = register(client)
+
+    resp = client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": tokens["refresh_token"]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"revoked": True}
+
+    reused = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": tokens["refresh_token"]},
+    )
+    assert reused.status_code == 401
+
+
+def test_logout_is_idempotent_for_unknown_refresh_token(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": "unknown-refresh-token"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"revoked": True}
+
+
 def test_register_rejects_duplicate_email(client: TestClient) -> None:
     register(client)
 

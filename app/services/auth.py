@@ -19,7 +19,7 @@ from app.core.security import (
 )
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import RefreshToken, User
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenPair
+from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, TokenPair
 
 
 def _normalize_email(email: str) -> str:
@@ -155,3 +155,20 @@ async def refresh_tokens(session: AsyncSession, body: RefreshRequest) -> TokenPa
     await _store_refresh_token(session, user, tokens.refresh_token)
     await session.commit()
     return tokens
+
+
+async def logout_user(session: AsyncSession, body: LogoutRequest) -> bool:
+    token_hash = hash_token(body.refresh_token)
+    result = await session.execute(
+        select(RefreshToken).where(
+            RefreshToken.token_hash == token_hash,
+            RefreshToken.revoked_at.is_(None),
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        return False
+
+    stored.revoked_at = datetime.now(UTC)
+    await session.commit()
+    return True
