@@ -7,12 +7,14 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import httpx
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.secrets import encrypt_secret
+from app.core.config import settings
+from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.tenant import Tenant, TenantAIConfig
@@ -62,8 +64,37 @@ class TelegramAdapter(ChannelAdapter):
         )
 
     async def send_outbound(self, conversation_ref: str, text: str) -> None:
-        # Real Telegram Bot API sending is intentionally kept out of this local step.
+        # Conversation-level replies use send_telegram_message because they need credentials.
         return None
+
+
+async def send_telegram_message(channel: Channel, chat_id: str, text: str) -> bool:
+    if not settings.TELEGRAM_DELIVERY_ENABLED:
+        return False
+
+    token = decrypt_secret(channel.credentials_encrypted)
+    if not token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Telegram bot token is not configured")
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=settings.TELEGRAM_DELIVERY_TIMEOUT_SEC) as client:
+            response = await client.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+            )
+            response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Telegram delivery failed",
+        ) from exc
+
+    return True
 
 
 async def list_channels(
@@ -188,7 +219,13 @@ async def process_telegram_webhook(
         )
         session.add(outbound)
         conversation.status = "auto"
-        await adapter.send_outbound(normalized.external_conversation_id, answer.answer)
+        delivered = await send_telegram_message(
+            channel,
+            normalized.external_conversation_id,
+            answer.answer,
+        )
+        if delivered:
+            outbound.ai_meta = {**outbound.ai_meta, "delivery": "telegram-bot-api"}
     else:
         conversation.status = "escalated"
 

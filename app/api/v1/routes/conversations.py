@@ -1,12 +1,22 @@
-"""Диалоги и сообщения — ядро inbox. Экран: /inbox, /inbox/[id]."""
+"""Inbox conversations and messages. Screen: /inbox."""
 
 import uuid
 
 from fastapi import APIRouter
 
 from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
-from app.schemas.conversations import ConversationResponse, ConversationThreadResponse
-from app.services.conversations import get_conversation_thread, list_conversations
+from app.schemas.conversations import (
+    ConversationActionResponse,
+    ConversationReplyRequest,
+    ConversationResponse,
+    ConversationThreadResponse,
+)
+from app.services.conversations import (
+    escalate_conversation,
+    get_conversation_thread,
+    list_conversations,
+    reply_to_conversation,
+)
 
 router = APIRouter()
 
@@ -29,11 +39,31 @@ async def get_conversation(
     return await get_conversation_thread(session, tenant_id_from_user(user), conversation_id)
 
 
-@router.post("/{conversation_id}/reply")
-async def reply(conversation_id: str, text: str, user: CurrentUser) -> dict:
-    raise NotImplementedError  # TODO: ответ менеджера → отправка в канал + kb_candidate
+@router.post("/{conversation_id}/reply", response_model=ConversationActionResponse)
+async def reply(
+    conversation_id: uuid.UUID,
+    body: ConversationReplyRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ConversationActionResponse:
+    return await reply_to_conversation(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
+        uuid.UUID(str(user["sub"])),
+        body,
+    )
 
 
-@router.post("/{conversation_id}/escalate")
-async def escalate(conversation_id: str, user: CurrentUser) -> dict:
-    raise NotImplementedError  # TODO: ручная эскалация
+@router.post("/{conversation_id}/escalate", response_model=ConversationActionResponse)
+async def escalate(
+    conversation_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ConversationActionResponse:
+    return await escalate_conversation(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
+        uuid.UUID(str(user["sub"])),
+    )

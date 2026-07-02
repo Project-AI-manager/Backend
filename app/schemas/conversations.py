@@ -3,7 +3,11 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class ConversationReplyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class ConversationMessageResponse(BaseModel):
@@ -30,3 +34,9 @@ class ConversationResponse(BaseModel):
 
 class ConversationThreadResponse(ConversationResponse):
     messages: list[ConversationMessageResponse]
+
+
+class ConversationActionResponse(BaseModel):
+    conversation: ConversationThreadResponse
+    message: ConversationMessageResponse | None = None
+    delivered: bool | None = None

@@ -1,15 +1,22 @@
 """Auth API tests: register, login, refresh and current user profile."""
 from collections.abc import AsyncGenerator, Generator
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.schema import Table
 
 from app.db.session import get_session
 from app.main import app
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import RefreshToken, User
+
+
+def create_table(sync_connection: Connection, table: object) -> None:
+    cast(Table, table).create(sync_connection)
 
 
 @pytest.fixture()
@@ -20,10 +27,13 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
         poolclass=StaticPool,
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Tenant.__table__.create)
-        await conn.run_sync(TenantAIConfig.__table__.create)
-        await conn.run_sync(User.__table__.create)
-        await conn.run_sync(RefreshToken.__table__.create)
+        for table in (
+            Tenant.__table__,
+            TenantAIConfig.__table__,
+            User.__table__,
+            RefreshToken.__table__,
+        ):
+            await conn.run_sync(create_table, table)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
