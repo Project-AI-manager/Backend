@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "local"
     YANDEX_API_KEY: str = ""
     GIGACHAT_API_KEY: str = ""
+    TELEGRAM_DELIVERY_ENABLED: bool = False
+    TELEGRAM_DELIVERY_TIMEOUT_SEC: float = 8.0
 
     ACCESS_TOKEN_TTL_MIN: int = 30
     REFRESH_TOKEN_TTL_DAYS: int = 30
