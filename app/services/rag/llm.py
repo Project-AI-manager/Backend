@@ -1,12 +1,19 @@
 """LLM providers behind one interface, with deterministic mock mode by default."""
 
 from abc import ABC, abstractmethod
+from typing import Any
+
+import httpx
 
 from app.core.config import settings
 
 
 class LLMProviderConfigurationError(RuntimeError):
     """Raised before generation when the configured provider cannot be used."""
+
+
+class LLMProviderRequestError(RuntimeError):
+    """Raised when a configured provider cannot complete a generation request."""
 
 
 class LLMProvider(ABC):
@@ -74,10 +81,159 @@ class GigaChatProvider(LLMProvider):
         raise NotImplementedError  # TODO: вызов GigaChat через httpx
 
 
+class OpenAICompatibleProvider(LLMProvider):
+    """OpenAI-compatible chat completions provider, used by UniRouter locally."""
+
+    provider_name = "openai-compatible"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_sec: float,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key.strip()
+        self.model = model.strip()
+        self.timeout_sec = timeout_sec
+
+        missing = [
+            name
+            for name, value in (
+                ("OPENAI_COMPATIBLE_BASE_URL", self.base_url),
+                ("OPENAI_COMPATIBLE_API_KEY", self.api_key),
+                ("OPENAI_COMPATIBLE_MODEL", self.model),
+            )
+            if not value
+        ]
+        if missing:
+            raise LLMProviderConfigurationError(
+                "OpenAI-compatible provider is not configured: "
+                + ", ".join(missing)
+                + " is required"
+            )
+
+    async def generate(
+        self,
+        prompt: str,
+        context: list[str],
+        *,
+        system_prompt: str = "",
+        history: list[str] | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": self._messages(
+                prompt=prompt,
+                context=context,
+                system_prompt=system_prompt,
+                history=history or [],
+            ),
+            "temperature": 0.2,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise LLMProviderRequestError("OpenAI-compatible provider request failed") from exc
+
+        content = self._extract_content(data)
+        if not content:
+            raise LLMProviderRequestError("OpenAI-compatible provider returned an empty answer")
+        return content
+
+    @staticmethod
+    def _messages(
+        *,
+        prompt: str,
+        context: list[str],
+        system_prompt: str,
+        history: list[str],
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+
+        clean_context = [item.strip() for item in context if item.strip()]
+        if clean_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Knowledge base context:\n" + "\n\n".join(clean_context),
+                }
+            )
+
+        for turn in history[-8:]:
+            role, content = OpenAICompatibleProvider._history_turn(turn)
+            if content:
+                messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": prompt.strip()})
+        return messages
+
+    @staticmethod
+    def _history_turn(turn: str) -> tuple[str, str]:
+        raw_role, separator, raw_content = turn.partition(":")
+        if not separator:
+            return "user", turn.strip()
+
+        role_name = raw_role.strip().lower()
+        content = raw_content.strip()
+        if role_name in {"manager", "ai", "assistant"}:
+            return "assistant", content
+        if role_name == "system":
+            return "system", content
+        return "user", content
+
+    @staticmethod
+    def _extract_content(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return ""
+        message = first_choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts = [
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                ]
+                return "\n".join(part.strip() for part in parts if part.strip())
+        text = first_choice.get("text")
+        return text.strip() if isinstance(text, str) else ""
+
+
 def get_llm(provider_name: str | None = None) -> LLMProvider:
     configured_name = (provider_name or settings.LLM_PROVIDER).strip().lower()
     if configured_name == "mock":
         return MockLLM()
+    if configured_name in {"openai", "openai-compatible", "unirouter"}:
+        return OpenAICompatibleProvider(
+            base_url=settings.OPENAI_COMPATIBLE_BASE_URL,
+            api_key=settings.OPENAI_COMPATIBLE_API_KEY,
+            model=settings.OPENAI_COMPATIBLE_MODEL,
+            timeout_sec=settings.OPENAI_COMPATIBLE_TIMEOUT_SEC,
+        )
     if configured_name in {"yandexgpt", "gigachat"}:
         raise LLMProviderConfigurationError(
             f"LLM provider '{configured_name}' is not available in local mock mode"
