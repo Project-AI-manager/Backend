@@ -182,6 +182,25 @@ def test_create_and_list_knowledge_documents(
     assert documents[0]["id"] == created_data["id"]
     assert documents[0]["chunks_count"] == 1
 
+    detail = client.get(
+        f"/api/v1/knowledge/documents/{created_data['id']}",
+        headers=auth_headers(),
+    )
+
+    assert detail.status_code == 200, detail.text
+    detail_data = detail.json()
+    assert detail_data["id"] == created_data["id"]
+    assert len(detail_data["chunks"]) == 1
+    assert detail_data["chunks"][0]["position"] == 0
+
+    archived = client.post(
+        f"/api/v1/knowledge/documents/{created_data['id']}/archive",
+        headers=auth_headers(),
+    )
+
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["document"]["status"] == "archived"
+
 
 def test_list_and_approve_knowledge_candidate(
     client: TestClient,
@@ -207,3 +226,20 @@ def test_list_and_approve_knowledge_candidate(
     assert data["resulting_document_id"]
     assert data["document"]["title"].startswith("Ответ из диалога:")
     assert data["document"]["chunks_count"] == 1
+
+
+def test_reject_knowledge_candidate(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_candidate(session_factory))
+
+    rejected = client.post(
+        f"/api/v1/knowledge/candidates/{CANDIDATE_ID}/reject",
+        headers=auth_headers(),
+    )
+
+    assert rejected.status_code == 200, rejected.text
+    data = rejected.json()
+    assert data["status"] == "rejected"
+    assert data["resulting_document_id"] is None
