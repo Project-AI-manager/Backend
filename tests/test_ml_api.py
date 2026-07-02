@@ -268,4 +268,6 @@ def test_ml_answer_returns_stable_error_for_unknown_provider(
     )
 
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "llm_provider_unavailable"
+    detail = response.json()["detail"]
+    assert detail["code"] == "llm_provider_unavailable"
+    assert detail["message"] == detail["msg"]

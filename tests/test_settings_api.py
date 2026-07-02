@@ -171,7 +171,10 @@ def test_update_ai_settings_rejects_unknown_provider(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "unsupported_llm_provider"
+    detail = response.json()["detail"]
+    assert detail["code"] == "unsupported_llm_provider"
+    assert detail["message"] == detail["msg"]
+    assert "mock" in detail["available_providers"]
 
 
 def test_workspace_settings_read_and_update_company_name(
