@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.errors import configure_exception_handlers
 from app.core.logging import configure_logging
 
 
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI-сотрудник в едином окне", version="0.1.0", lifespan=lifespan)
+configure_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,

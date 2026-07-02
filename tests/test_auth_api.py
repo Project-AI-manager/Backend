@@ -135,3 +135,9 @@ def test_register_rejects_duplicate_email(client: TestClient) -> None:
     )
 
     assert resp.status_code == 409
+    assert resp.json()["detail"] == {
+        "code": "conflict",
+        "message": "User with this email already exists",
+        "msg": "User with this email already exists",
+        "errors": [],
+    }
