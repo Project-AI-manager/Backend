@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     LLM_PROVIDER: str = "mock"
     EMBEDDING_PROVIDER: str = "local"
+    OPENAI_COMPATIBLE_BASE_URL: str = ""
+    OPENAI_COMPATIBLE_API_KEY: str = ""
+    OPENAI_COMPATIBLE_MODEL: str = "cx/gpt-5.4-mini"
+    OPENAI_COMPATIBLE_TIMEOUT_SEC: float = 30.0
     YANDEX_API_KEY: str = ""
     GIGACHAT_API_KEY: str = ""
     TELEGRAM_DELIVERY_ENABLED: bool = False

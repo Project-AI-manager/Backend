@@ -1,16 +1,21 @@
 """Unit tests for the ML message orchestration layer."""
 
 import uuid
+from typing import Any
 
+import httpx
 import pytest
 
+from app.core.config import settings
 from app.services.ml.contracts import ChatTurn, MemorySnippet, MLAnswerInput
 from app.services.ml.memory import KeywordMemoryRetriever
 from app.services.ml.service import MLMessageService
 from app.services.rag.llm import (
     LLMProvider,
     LLMProviderConfigurationError,
+    LLMProviderRequestError,
     MockLLM,
+    OpenAICompatibleProvider,
     get_llm,
 )
 
@@ -179,4 +184,114 @@ def test_unknown_and_external_providers_fail_before_generation() -> None:
         get_llm("yandexgpt")
     with pytest.raises(LLMProviderConfigurationError):
         get_llm("gigachat")
+    with pytest.raises(LLMProviderConfigurationError):
+        get_llm("openai-compatible")
     assert isinstance(get_llm("mock"), MockLLM)
+
+
+def test_get_llm_returns_openai_compatible_provider_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", "http://localhost:20128/v1")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MODEL", "cx/gpt-5.4-mini")
+
+    provider = get_llm("unirouter")
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.provider_name == "openai-compatible"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_sends_chat_completion_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> httpx.Response:
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"choices": [{"message": {"content": "Ответ готов"}}]},
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:20128/v1/",
+        api_key="runtime-key",
+        model="cx/gpt-5.4-mini",
+        timeout_sec=12.0,
+    )
+
+    answer = await provider.generate(
+        "Вопрос клиента",
+        ["Контекст базы знаний"],
+        system_prompt="Отвечай кратко",
+        history=["customer: Привет", "manager: Добрый день"],
+    )
+
+    assert answer == "Ответ готов"
+    assert captured["timeout"] == 12.0
+    assert captured["url"] == "http://localhost:20128/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer runtime-key"
+    assert captured["json"]["model"] == "cx/gpt-5.4-mini"
+    assert captured["json"]["messages"][0] == {"role": "system", "content": "Отвечай кратко"}
+    assert captured["json"]["messages"][-1] == {"role": "user", "content": "Вопрос клиента"}
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_raises_on_empty_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"choices": [{"message": {"content": ""}}]},
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:20128/v1",
+        api_key="runtime-key",
+        model="cx/gpt-5.4-mini",
+        timeout_sec=12.0,
+    )
+
+    with pytest.raises(LLMProviderRequestError):
+        await provider.generate("Вопрос", [])

@@ -9,7 +9,7 @@ from app.schemas.ml import MLAnswerRequest, MLAnswerResponse, MLSourceSchema
 from app.services.ml.contracts import AssistantProfile, ChatTurn, MLAnswerInput
 from app.services.ml.memory import DatabaseMemoryRetriever
 from app.services.ml.service import MLMessageService
-from app.services.rag.llm import LLMProviderConfigurationError, get_llm
+from app.services.rag.llm import LLMProviderConfigurationError, LLMProviderRequestError, get_llm
 
 router = APIRouter()
 
@@ -41,17 +41,26 @@ async def answer_message(
         retriever=DatabaseMemoryRetriever(session),
         llm=llm,
     )
-    result = await service.answer(
-        MLAnswerInput(
-            tenant_id=tenant_id,
-            message=body.message,
-            history=tuple(ChatTurn(role=turn.role, text=turn.text) for turn in body.history),
-            profile=AssistantProfile(company_name=tenant.name),
-            custom_system_prompt=ai_config.system_prompt if ai_config else "",
-            confidence_threshold=ai_config.confidence_threshold if ai_config else 80,
-            auto_reply_enabled=ai_config.auto_reply_enabled if ai_config else False,
+    try:
+        result = await service.answer(
+            MLAnswerInput(
+                tenant_id=tenant_id,
+                message=body.message,
+                history=tuple(ChatTurn(role=turn.role, text=turn.text) for turn in body.history),
+                profile=AssistantProfile(company_name=tenant.name),
+                custom_system_prompt=ai_config.system_prompt if ai_config else "",
+                confidence_threshold=ai_config.confidence_threshold if ai_config else 80,
+                auto_reply_enabled=ai_config.auto_reply_enabled if ai_config else False,
+            )
         )
-    )
+    except LLMProviderRequestError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "llm_provider_request_failed",
+                "message": str(exc),
+            },
+        ) from exc
     return MLAnswerResponse(
         answer=result.answer,
         confidence=result.confidence,
