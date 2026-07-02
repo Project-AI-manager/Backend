@@ -22,6 +22,6 @@ def test_demo_seed_summary_contains_login_credentials() -> None:
     summary = build_demo_summary()
 
     assert summary["credentials"] == DEMO_CREDENTIALS
-    assert summary["credentials"]["owner_email"] == "owner@demo.ai-manager.local"
+    assert summary["credentials"]["owner_email"] == "owner.demo@example.com"
     assert summary["credentials"]["password"] == "demo-password"
     assert summary["channels"][0]["type"] == "telegram"

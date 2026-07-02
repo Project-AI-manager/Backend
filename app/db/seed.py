@@ -27,8 +27,8 @@ from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User
 
 DEMO_PASSWORD = "demo-password"
-DEMO_OWNER_EMAIL = "owner@demo.ai-manager.local"
-DEMO_MANAGER_EMAIL = "manager@demo.ai-manager.local"
+DEMO_OWNER_EMAIL = "owner.demo@example.com"
+DEMO_MANAGER_EMAIL = "manager.demo@example.com"
 
 DEMO_IDS = {
     "tenant": uuid.UUID("11111111-1111-4111-8111-111111111105"),
