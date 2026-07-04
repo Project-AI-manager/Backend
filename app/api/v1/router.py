@@ -6,6 +6,8 @@ from app.api.v1.routes import (
     auth,
     channels,
     conversations,
+    email,
+    integrations,
     knowledge,
     ml,
     settings,
@@ -15,6 +17,8 @@ from app.schemas.errors import ERROR_RESPONSES
 
 api_router = APIRouter(responses=ERROR_RESPONSES)
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(email.router, prefix="/email", tags=["email"])
+api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])

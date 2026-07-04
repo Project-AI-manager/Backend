@@ -20,6 +20,7 @@ from app.db.session import get_session
 from app.main import app
 from app.models.ops import Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant, TenantAIConfig
+from app.models.user import User
 
 TENANT_ID = uuid.UUID("55555555-5555-4555-8555-555555555501")
 USER_ID = uuid.UUID("55555555-5555-4555-8555-555555555502")
@@ -39,6 +40,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
     async with engine.begin() as conn:
         for table in (
             Tenant.__table__,
+            User.__table__,
             TenantAIConfig.__table__,
             Plan.__table__,
             Subscription.__table__,
@@ -81,6 +83,17 @@ async def seed_tenant(
 ) -> None:
     async with session_factory() as session:
         session.add(Tenant(id=TENANT_ID, name="ООО Север", slug="sever", status="active"))
+        session.add(
+            User(
+                id=USER_ID,
+                tenant_id=TENANT_ID,
+                email="owner@example.com",
+                full_name="Owner",
+                role="owner",
+                password_hash="test-password-hash",
+                status="active",
+            )
+        )
         if with_ai_config:
             session.add(
                 TenantAIConfig(

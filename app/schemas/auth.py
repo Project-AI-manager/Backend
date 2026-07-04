@@ -28,6 +28,25 @@ class LogoutResponse(BaseModel):
     revoked: bool = True
 
 
+class RequestPasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class EmailActionResponse(BaseModel):
+    ok: bool = True
+    sent: bool = False
+    dev_token: str | None = None
+
+
 class TokenPair(BaseModel):
     access_token: str
     refresh_token: str
@@ -41,3 +60,4 @@ class UserMeResponse(BaseModel):
     full_name: str
     role: str
     status: str
+    email_verified: bool = False

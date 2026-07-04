@@ -1,5 +1,6 @@
 """Команда и профиль. Экраны: /settings/team, /profile."""
 import uuid
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
@@ -13,12 +14,7 @@ router = APIRouter()
 
 @router.get("/me", response_model=UserMeResponse)
 async def me(user: CurrentUser, session: SessionDep) -> UserMeResponse:
-    try:
-        user_id = uuid.UUID(str(user["sub"]))
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token subject") from exc
-
-    db_user = await session.get(User, user_id)
+    db_user = cast(User | None, user.get("db_user"))
     if not db_user or db_user.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
 
@@ -29,6 +25,7 @@ async def me(user: CurrentUser, session: SessionDep) -> UserMeResponse:
         full_name=db_user.full_name,
         role=db_user.role,
         status=db_user.status,
+        email_verified=db_user.email_verified_at is not None,
     )
 
 
@@ -49,6 +46,7 @@ async def list_team(user: CurrentUser, session: SessionDep) -> list[UserMeRespon
             full_name=db_user.full_name,
             role=db_user.role,
             status=db_user.status,
+            email_verified=db_user.email_verified_at is not None,
         )
         for db_user in result.scalars().all()
     ]

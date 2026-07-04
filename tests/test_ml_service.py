@@ -259,6 +259,58 @@ async def test_openai_compatible_provider_sends_chat_completion_request(
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_provider_accepts_sse_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> httpx.Response:
+            body = "\n\n".join(
+                [
+                    (
+                        'data: {"choices":[{"delta":{"role":"assistant",'
+                        '"content":"Answer "},"finish_reason":null}]}'
+                    ),
+                    'data: {"choices":[{"delta":{"content":"ready"},"finish_reason":null}]}',
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                    "data: [DONE]",
+                ]
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                request=httpx.Request("POST", url),
+                content=body.encode(),
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:20128/v1",
+        api_key="runtime-key",
+        model="cx/gpt-5.4-mini",
+        timeout_sec=12.0,
+    )
+
+    answer = await provider.generate("Question", [])
+
+    assert answer == "Answer ready"
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_provider_raises_on_empty_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

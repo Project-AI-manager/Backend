@@ -23,6 +23,7 @@ from app.models.conversation import Conversation, Customer, Message
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
 from app.models.ops import Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant
+from app.models.user import User
 
 TENANT_ID = uuid.UUID("66666666-6666-4666-8666-666666666601")
 OTHER_TENANT_ID = uuid.UUID("66666666-6666-4666-8666-666666666602")
@@ -45,6 +46,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
     async with engine.begin() as conn:
         for table in (
             Tenant.__table__,
+            User.__table__,
             Channel.__table__,
             Customer.__table__,
             Conversation.__table__,
@@ -92,6 +94,15 @@ async def seed_analytics_data(session_factory: async_sessionmaker[AsyncSession])
             [
                 Tenant(id=TENANT_ID, name="Demo", slug="demo", status="active"),
                 Tenant(id=OTHER_TENANT_ID, name="Other", slug="other", status="active"),
+                User(
+                    id=USER_ID,
+                    tenant_id=TENANT_ID,
+                    email="owner@example.com",
+                    full_name="Owner",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                ),
                 Channel(
                     id=CHANNEL_ID,
                     tenant_id=TENANT_ID,
@@ -330,6 +341,17 @@ def test_analytics_overview_returns_zeroes_for_empty_tenant(
     async def seed_empty_tenant() -> None:
         async with session_factory() as session:
             session.add(Tenant(id=TENANT_ID, name="Empty", slug="empty", status="active"))
+            session.add(
+                User(
+                    id=USER_ID,
+                    tenant_id=TENANT_ID,
+                    email="owner@example.com",
+                    full_name="Owner",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                )
+            )
             await session.commit()
 
     asyncio.run(seed_empty_tenant())

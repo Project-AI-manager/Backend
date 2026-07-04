@@ -19,10 +19,12 @@ from app.db.session import get_session
 from app.main import app
 from app.models.knowledge import KbChunk, KbDocument
 from app.models.tenant import Tenant, TenantAIConfig
+from app.models.user import User
 
 TENANT_A = uuid.UUID("33333333-3333-4333-8333-333333333301")
 TENANT_B = uuid.UUID("33333333-3333-4333-8333-333333333302")
-USER_ID = uuid.UUID("33333333-3333-4333-8333-333333333310")
+USER_A_ID = uuid.UUID("33333333-3333-4333-8333-333333333310")
+USER_B_ID = uuid.UUID("33333333-3333-4333-8333-333333333311")
 
 
 def create_table(sync_connection: Connection, table: object) -> None:
@@ -39,6 +41,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
     async with engine.begin() as conn:
         for table in (
             Tenant.__table__,
+            User.__table__,
             TenantAIConfig.__table__,
             KbDocument.__table__,
             KbChunk.__table__,
@@ -68,7 +71,8 @@ def client(
 
 
 def auth_headers(tenant_id: uuid.UUID) -> dict[str, str]:
-    token = create_token(USER_ID, tenant_id=tenant_id, role="owner")
+    user_id = USER_B_ID if tenant_id == TENANT_B else USER_A_ID
+    token = create_token(user_id, tenant_id=tenant_id, role="owner")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -80,6 +84,24 @@ async def seed_ml_data(
             [
                 Tenant(id=TENANT_A, name="Компания Альфа", slug="alpha", status="active"),
                 Tenant(id=TENANT_B, name="Компания Бета", slug="beta", status="active"),
+                User(
+                    id=USER_A_ID,
+                    tenant_id=TENANT_A,
+                    email="owner-alpha@example.com",
+                    full_name="Owner Alpha",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                ),
+                User(
+                    id=USER_B_ID,
+                    tenant_id=TENANT_B,
+                    email="owner-beta@example.com",
+                    full_name="Owner Beta",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                ),
                 TenantAIConfig(
                     tenant_id=TENANT_A,
                     auto_reply_enabled=True,

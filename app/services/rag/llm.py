@@ -1,5 +1,6 @@
 """LLM providers behind one interface, with deterministic mock mode by default."""
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -145,8 +146,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     json=payload,
                 )
                 response.raise_for_status()
-                data = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+                data = self._parse_response(response)
+        except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
             raise LLMProviderRequestError("OpenAI-compatible provider request failed") from exc
 
         content = self._extract_content(data)
@@ -221,6 +222,61 @@ class OpenAICompatibleProvider(LLMProvider):
                 return "\n".join(part.strip() for part in parts if part.strip())
         text = first_choice.get("text")
         return text.strip() if isinstance(text, str) else ""
+
+    @staticmethod
+    def _parse_response(response: httpx.Response) -> Any:
+        text = response.text.strip()
+        content_type = response.headers.get("content-type", "").lower()
+
+        if "text/event-stream" in content_type or text.startswith("data:"):
+            return OpenAICompatibleProvider._parse_sse_response(text)
+
+        return response.json()
+
+    @staticmethod
+    def _parse_sse_response(text: str) -> dict[str, Any]:
+        content_parts: list[str] = []
+        last_payload: dict[str, Any] = {}
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+
+            raw_payload = line.removeprefix("data:").strip()
+            if not raw_payload or raw_payload == "[DONE]":
+                continue
+
+            payload = json.loads(raw_payload)
+            if not isinstance(payload, dict):
+                continue
+
+            last_payload = payload
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                continue
+
+            delta = first_choice.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str):
+                    content_parts.append(content)
+                    continue
+
+            message = first_choice.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    content_parts.append(content)
+
+        if content_parts:
+            return {"choices": [{"message": {"content": "".join(content_parts)}}]}
+
+        return last_payload
 
 
 def get_llm(provider_name: str | None = None) -> LLMProvider:

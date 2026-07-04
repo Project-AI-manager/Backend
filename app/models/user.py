@@ -16,6 +16,10 @@ class User(Base, UUIDMixin, TimestampMixin):
     role: Mapped[str] = mapped_column(String(16), default="manager")  # owner|admin|manager
     password_hash: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), default="active")  # active|invited|disabled
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
 
 class RefreshToken(Base, UUIDMixin, TimestampMixin):
