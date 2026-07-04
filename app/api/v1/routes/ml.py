@@ -7,7 +7,7 @@ from app.core.config import settings
 from app.models.tenant import Tenant, TenantAIConfig
 from app.schemas.ml import MLAnswerRequest, MLAnswerResponse, MLSourceSchema
 from app.services.ml.contracts import AssistantProfile, ChatTurn, MLAnswerInput
-from app.services.ml.memory import DatabaseMemoryRetriever
+from app.services.ml.memory import get_memory_retriever
 from app.services.ml.service import MLMessageService
 from app.services.rag.llm import LLMProviderConfigurationError, LLMProviderRequestError, get_llm
 
@@ -38,7 +38,7 @@ async def answer_message(
             },
         ) from exc
     service = MLMessageService(
-        retriever=DatabaseMemoryRetriever(session),
+        retriever=get_memory_retriever(session),
         llm=llm,
     )
     try:

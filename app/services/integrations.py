@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import httpx
-
 from app.core.config import settings
 from app.schemas.integrations import IntegrationProbeResponse, IntegrationsHealthResponse
 from app.services.rag.llm import (
@@ -11,6 +9,7 @@ from app.services.rag.llm import (
     LLMProviderRequestError,
     OpenAICompatibleProvider,
 )
+from app.services.rag.vector_store import get_vector_store
 
 
 def _mask(value: str, *, visible: int = 6) -> str:
@@ -127,22 +126,29 @@ async def probe_qdrant() -> IntegrationProbeResponse:
             details=details,
         )
 
+    vector_store = get_vector_store()
+    if vector_store is None:
+        return IntegrationProbeResponse(
+            name="qdrant",
+            status="disabled",
+            message="Qdrant is disabled; SQL keyword retrieval is used",
+            details=details,
+        )
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{settings.QDRANT_URL.rstrip('/')}/collections")
-            response.raise_for_status()
-    except (httpx.HTTPError, ValueError) as exc:
+        await vector_store.ensure_collection()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report any client failure.
         return IntegrationProbeResponse(
             name="qdrant",
             status="error",
-            message="Qdrant is not reachable",
+            message="Qdrant collection is not ready",
             details={**details, "error": str(exc)},
         )
 
     return IntegrationProbeResponse(
         name="qdrant",
         status="ok",
-        message="Qdrant is reachable",
+        message="Qdrant is reachable and collection is ready",
         details=details,
     )
 

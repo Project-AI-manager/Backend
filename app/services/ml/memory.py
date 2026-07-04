@@ -11,8 +11,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import log
 from app.models.knowledge import KbChunk, KbDocument
 from app.services.ml.contracts import MemorySnippet
+from app.services.rag.embeddings import EmbeddingProvider, get_embedder
+from app.services.rag.vector_store import VectorSearchHit, VectorStore, get_vector_store
 
 TOKEN_RE = re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9]+")
 STOP_WORDS = {
@@ -113,6 +116,102 @@ class DatabaseMemoryRetriever(MemoryRetriever):
         return rank_snippets(snippets, query=query, limit=limit)
 
 
+class VectorMemoryRetriever(MemoryRetriever):
+    """Vector-first retriever with SQL verification and keyword fallback."""
+
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        vector_store: VectorStore,
+        embedder: EmbeddingProvider | None = None,
+        fallback: MemoryRetriever | None = None,
+    ) -> None:
+        self.session = session
+        self.vector_store = vector_store
+        self.embedder = embedder or get_embedder()
+        self.fallback = fallback or DatabaseMemoryRetriever(session)
+
+    async def retrieve(
+        self,
+        *,
+        tenant_id: UUID,
+        query: str,
+        limit: int = 4,
+    ) -> list[MemorySnippet]:
+        try:
+            [query_vector] = await self.embedder.embed([query])
+            hits = await self.vector_store.search(
+                tenant_id=tenant_id,
+                vector=query_vector,
+                limit=limit,
+            )
+            snippets = await self._snippets_from_hits(
+                tenant_id=tenant_id,
+                hits=hits,
+                limit=limit,
+            )
+            if snippets:
+                return snippets
+        except Exception as exc:  # noqa: BLE001 - retrieval must degrade to SQL fallback.
+            log.warning("vector_retrieval_failed", error=str(exc), tenant_id=str(tenant_id))
+
+        return await self.fallback.retrieve(tenant_id=tenant_id, query=query, limit=limit)
+
+    async def _snippets_from_hits(
+        self,
+        *,
+        tenant_id: UUID,
+        hits: list[VectorSearchHit],
+        limit: int,
+    ) -> list[MemorySnippet]:
+        chunk_ids = [hit.chunk_id for hit in hits]
+        if not chunk_ids:
+            return []
+
+        result = await self.session.execute(
+            select(KbChunk, KbDocument.title)
+            .join(KbDocument, KbDocument.id == KbChunk.document_id)
+            .where(
+                KbChunk.id.in_(chunk_ids),
+                KbChunk.tenant_id == tenant_id,
+                KbDocument.tenant_id == tenant_id,
+                KbDocument.status == "ready",
+            )
+        )
+        chunks_by_id = {chunk.id: (chunk, title) for chunk, title in result.all()}
+        snippets: list[MemorySnippet] = []
+        for hit in hits:
+            row = chunks_by_id.get(hit.chunk_id)
+            if row is None:
+                continue
+            chunk, title = row
+            snippets.append(
+                MemorySnippet(
+                    id=str(chunk.id),
+                    title=title,
+                    text=chunk.text,
+                    score=_bounded_score(hit.score),
+                    source="qdrant",
+                    tags={str(key): str(value) for key, value in (chunk.tags or {}).items()},
+                )
+            )
+            if len(snippets) >= limit:
+                break
+        return snippets
+
+
+def get_memory_retriever(session: AsyncSession) -> MemoryRetriever:
+    vector_store = get_vector_store()
+    if vector_store is None:
+        return DatabaseMemoryRetriever(session)
+    return VectorMemoryRetriever(
+        session=session,
+        vector_store=vector_store,
+        fallback=DatabaseMemoryRetriever(session),
+    )
+
+
 def rank_snippets(
     snippets: Iterable[MemorySnippet],
     *,
@@ -142,6 +241,10 @@ def rank_snippets(
         )
 
     return sorted(scored, key=lambda item: item.score, reverse=True)[:limit]
+
+
+def _bounded_score(score: float) -> float:
+    return round(max(0.0, min(1.0, score)), 3)
 
 
 def default_sales_memory() -> list[MemorySnippet]:

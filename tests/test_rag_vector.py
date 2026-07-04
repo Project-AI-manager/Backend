@@ -1,0 +1,218 @@
+"""Vector RAG tests without a real Qdrant service."""
+
+from __future__ import annotations
+
+import math
+import uuid
+from collections.abc import AsyncGenerator, Sequence
+from typing import cast
+
+import pytest
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.schema import Table
+
+from app.models.knowledge import KbChunk, KbDocument
+from app.models.tenant import Tenant
+from app.services.ml.memory import VectorMemoryRetriever
+from app.services.rag.embeddings import VECTOR_DIM, LocalEmbedding
+from app.services.rag.vector_store import VectorPoint, VectorSearchHit
+
+TENANT_A = uuid.UUID("55555555-5555-4555-8555-555555555501")
+TENANT_B = uuid.UUID("55555555-5555-4555-8555-555555555502")
+
+
+class FakeVectorStore:
+    def __init__(self, hits: list[VectorSearchHit]) -> None:
+        self.hits = hits
+        self.searched_tenant_id: uuid.UUID | None = None
+        self.upserted: list[VectorPoint] = []
+
+    async def ensure_collection(self) -> None:
+        return None
+
+    async def upsert_chunks(self, points: Sequence[VectorPoint]) -> None:
+        self.upserted.extend(points)
+
+    async def search(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        vector: list[float],
+        limit: int,
+    ) -> list[VectorSearchHit]:
+        self.searched_tenant_id = tenant_id
+        return self.hits[:limit]
+
+    async def delete_document(self, *, tenant_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        return None
+
+
+class FailingVectorStore(FakeVectorStore):
+    async def search(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        vector: list[float],
+        limit: int,
+    ) -> list[VectorSearchHit]:
+        raise RuntimeError("qdrant unavailable")
+
+
+def create_table(sync_connection: Connection, table: object) -> None:
+    cast(Table, table).create(sync_connection)
+
+
+@pytest.fixture()
+async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        for table in (
+            Tenant.__table__,
+            KbDocument.__table__,
+            KbChunk.__table__,
+        ):
+            await conn.run_sync(create_table, table)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_local_embedding_is_deterministic_non_zero_and_normalized() -> None:
+    embedder = LocalEmbedding()
+
+    first, second, empty = await embedder.embed(["Telegram setup", "Telegram setup", ""])
+
+    assert first == second
+    assert len(first) == VECTOR_DIM
+    assert any(value != 0 for value in first)
+    assert empty == [0.0] * VECTOR_DIM
+    assert math.isclose(math.sqrt(sum(value * value for value in first)), 1.0, abs_tol=0.0001)
+
+
+@pytest.mark.asyncio
+async def test_vector_retriever_uses_qdrant_hits_and_sql_tenant_filter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    chunk_a_id, chunk_b_id, archived_chunk_id = await _seed_vector_data(session_factory)
+    vector_store = FakeVectorStore(
+        [
+            VectorSearchHit(chunk_id=chunk_b_id, score=0.99),
+            VectorSearchHit(chunk_id=archived_chunk_id, score=0.98),
+            VectorSearchHit(chunk_id=chunk_a_id, score=0.97),
+        ]
+    )
+
+    async with session_factory() as session:
+        retriever = VectorMemoryRetriever(session=session, vector_store=vector_store)
+        snippets = await retriever.retrieve(
+            tenant_id=TENANT_A,
+            query="activation handbook",
+            limit=3,
+        )
+
+    assert vector_store.searched_tenant_id == TENANT_A
+    assert len(snippets) == 1
+    assert snippets[0].id == str(chunk_a_id)
+    assert snippets[0].source == "qdrant"
+    assert snippets[0].score == 0.97
+    assert snippets[0].title == "Alpha handbook"
+
+
+@pytest.mark.asyncio
+async def test_vector_retriever_falls_back_to_sql_when_vector_store_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_vector_data(session_factory)
+
+    async with session_factory() as session:
+        retriever = VectorMemoryRetriever(
+            session=session,
+            vector_store=FailingVectorStore([]),
+        )
+        snippets = await retriever.retrieve(
+            tenant_id=TENANT_A,
+            query="telegram activation",
+            limit=2,
+        )
+
+    assert len(snippets) == 1
+    assert snippets[0].source == "knowledge-base"
+    assert snippets[0].title == "Alpha handbook"
+
+
+async def _seed_vector_data(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Tenant(id=TENANT_A, name="Alpha", slug="alpha-vector", status="active"),
+                Tenant(id=TENANT_B, name="Beta", slug="beta-vector", status="active"),
+            ]
+        )
+        ready_a = KbDocument(
+            tenant_id=TENANT_A,
+            title="Alpha handbook",
+            source_type="manual",
+            status="ready",
+            version=1,
+        )
+        ready_b = KbDocument(
+            tenant_id=TENANT_B,
+            title="Beta handbook",
+            source_type="manual",
+            status="ready",
+            version=1,
+        )
+        archived = KbDocument(
+            tenant_id=TENANT_A,
+            title="Archived handbook",
+            source_type="manual",
+            status="archived",
+            version=1,
+        )
+        session.add_all([ready_a, ready_b, archived])
+        await session.flush()
+        chunk_a = KbChunk(
+            tenant_id=TENANT_A,
+            document_id=ready_a.id,
+            text="Telegram activation takes fifteen minutes.",
+            position=0,
+            token_count=5,
+            vector_id="alpha-vector",
+            tags={"topic": "telegram"},
+            version=1,
+        )
+        chunk_b = KbChunk(
+            tenant_id=TENANT_B,
+            document_id=ready_b.id,
+            text="Beta private pricing must not leak.",
+            position=0,
+            token_count=6,
+            vector_id="beta-vector",
+            tags={"topic": "telegram"},
+            version=1,
+        )
+        archived_chunk = KbChunk(
+            tenant_id=TENANT_A,
+            document_id=archived.id,
+            text="Old archived Telegram rule.",
+            position=0,
+            token_count=4,
+            vector_id="archived-vector",
+            tags={"topic": "telegram"},
+            version=1,
+        )
+        session.add_all([chunk_a, chunk_b, archived_chunk])
+        await session.commit()
+        return chunk_a.id, chunk_b.id, archived_chunk.id
