@@ -16,6 +16,7 @@ class IntegrationProbeResponse(BaseModel):
 
 class IntegrationsHealthResponse(BaseModel):
     llm: IntegrationProbeResponse
+    embeddings: IntegrationProbeResponse
     qdrant: IntegrationProbeResponse
     email: IntegrationProbeResponse
     telegram: IntegrationProbeResponse

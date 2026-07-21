@@ -4,7 +4,11 @@ from fastapi import APIRouter
 
 from app.api.deps import AdminUser
 from app.schemas.integrations import IntegrationProbeResponse, IntegrationsHealthResponse
-from app.services.integrations import integrations_health, probe_llm_provider
+from app.services.integrations import (
+    integrations_health,
+    probe_embedding_provider,
+    probe_llm_provider,
+)
 
 router = APIRouter()
 
@@ -19,3 +23,8 @@ async def health(user: AdminUser) -> IntegrationsHealthResponse:
 async def llm_probe(user: AdminUser) -> IntegrationProbeResponse:
     del user
     return await probe_llm_provider(probe=True)
+
+
+@router.post("/embeddings/probe", response_model=IntegrationProbeResponse)
+async def embeddings_probe() -> IntegrationProbeResponse:
+    return await probe_embedding_provider(probe=True)

@@ -10,7 +10,6 @@ from uuid import UUID
 from qdrant_client import AsyncQdrantClient, models
 
 from app.core.config import settings
-from app.services.rag.embeddings import VECTOR_DIM
 
 
 @dataclass(frozen=True)
@@ -57,23 +56,46 @@ class QdrantVectorStore:
         *,
         url: str,
         collection: str,
+        vector_size: int,
         client: AsyncQdrantClient | None = None,
     ) -> None:
         self.collection = collection
+        self.vector_size = vector_size
         self.client = client or AsyncQdrantClient(url=url)
 
     async def ensure_collection(self) -> None:
         exists = await self.client.collection_exists(self.collection)
         if exists:
+            collection = await self.client.get_collection(self.collection)
+            actual_size = _collection_vector_size(collection)
+            if actual_size is None:
+                raise RuntimeError(
+                    f"Qdrant collection '{self.collection}' has no single dense vector config"
+                )
+            if actual_size != self.vector_size:
+                raise RuntimeError(
+                    f"Qdrant collection '{self.collection}' dimension is {actual_size}, "
+                    f"but EMBEDDING_DIMENSION is {self.vector_size}. "
+                    "Create a new collection or reindex it with the configured dimension."
+                )
             return
         await self.client.create_collection(
             collection_name=self.collection,
-            vectors_config=models.VectorParams(size=VECTOR_DIM, distance=models.Distance.COSINE),
+            vectors_config=models.VectorParams(
+                size=self.vector_size,
+                distance=models.Distance.COSINE,
+            ),
         )
 
     async def upsert_chunks(self, points: Sequence[VectorPoint]) -> None:
         if not points:
             return
+        invalid = [point for point in points if len(point.vector) != self.vector_size]
+        if invalid:
+            raise ValueError(
+                f"Vector dimension mismatch: expected {self.vector_size}, "
+                f"got {len(invalid[0].vector)}"
+            )
         await self.ensure_collection()
         await self.client.upsert(
             collection_name=self.collection,
@@ -106,6 +128,10 @@ class QdrantVectorStore:
     ) -> list[VectorSearchHit]:
         if limit <= 0:
             return []
+        if len(vector) != self.vector_size:
+            raise ValueError(
+                f"Query vector dimension mismatch: expected {self.vector_size}, got {len(vector)}"
+            )
         await self.ensure_collection()
         response = await self.client.query_points(
             collection_name=self.collection,
@@ -160,7 +186,17 @@ class QdrantVectorStore:
 def get_vector_store() -> VectorStore | None:
     if not settings.QDRANT_ENABLED:
         return None
-    return QdrantVectorStore(url=settings.QDRANT_URL, collection=settings.QDRANT_COLLECTION)
+    return QdrantVectorStore(
+        url=settings.QDRANT_URL,
+        collection=settings.QDRANT_COLLECTION,
+        vector_size=settings.EMBEDDING_DIMENSION,
+    )
+
+
+def _collection_vector_size(collection: Any) -> int | None:
+    vectors = collection.config.params.vectors
+    size = getattr(vectors, "size", None)
+    return int(size) if isinstance(size, int) else None
 
 
 def _payload_dict(payload: Any) -> dict[str, Any]:

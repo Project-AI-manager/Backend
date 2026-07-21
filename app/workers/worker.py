@@ -5,6 +5,7 @@
 from arq.connections import RedisSettings
 
 from app.core.config import settings
+from app.services.knowledge import ingest_document
 
 
 async def process_inbound_message(ctx: dict, message_id: str) -> None:
@@ -12,8 +13,9 @@ async def process_inbound_message(ctx: dict, message_id: str) -> None:
     # from app.services.rag.pipeline import answer ...
 
 
-async def reindex_document(ctx: dict, document_id: str) -> None:
-    """Переиндексация документа базы знаний в Qdrant. TODO."""
+async def reindex_document(ctx: dict, tenant_id: str, document_id: str) -> int:
+    """Replace one document's vectors using the current embedding configuration."""
+    return await ingest_document(tenant_id, document_id)
 
 
 class WorkerSettings:

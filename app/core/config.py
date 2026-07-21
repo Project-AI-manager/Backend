@@ -34,6 +34,12 @@ class Settings(BaseSettings):
 
     LLM_PROVIDER: str = "mock"
     EMBEDDING_PROVIDER: str = "local"
+    EMBEDDING_BASE_URL: str = ""
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_DIMENSION: int = 1024
+    EMBEDDING_TIMEOUT_SEC: float = 30.0
+    EMBEDDING_PROBE_TIMEOUT_SEC: float = 10.0
     OPENAI_COMPATIBLE_BASE_URL: str = ""
     OPENAI_COMPATIBLE_API_KEY: str = ""
     OPENAI_COMPATIBLE_MODEL: str = "cx/gpt-5.4-mini"

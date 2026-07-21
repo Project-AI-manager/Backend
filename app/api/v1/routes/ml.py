@@ -38,7 +38,7 @@ async def answer_message(
             },
         ) from exc
     service = MLMessageService(
-        retriever=get_memory_retriever(session),
+        retriever=await get_memory_retriever(session, tenant_id),
         llm=llm,
     )
     try:

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import log
 from app.models.knowledge import KbChunk, KbDocument
+from app.models.tenant import TenantAIConfig
 from app.services.ml.contracts import MemorySnippet
 from app.services.rag.embeddings import EmbeddingProvider, get_embedder
 from app.services.rag.vector_store import VectorSearchHit, VectorStore, get_vector_store
@@ -201,13 +202,15 @@ class VectorMemoryRetriever(MemoryRetriever):
         return snippets
 
 
-def get_memory_retriever(session: AsyncSession) -> MemoryRetriever:
+async def get_memory_retriever(session: AsyncSession, tenant_id: UUID) -> MemoryRetriever:
     vector_store = get_vector_store()
     if vector_store is None:
         return DatabaseMemoryRetriever(session)
+    ai_config = await session.get(TenantAIConfig, tenant_id)
     return VectorMemoryRetriever(
         session=session,
         vector_store=vector_store,
+        embedder=get_embedder(ai_config.embedding_model if ai_config else None),
         fallback=DatabaseMemoryRetriever(session),
     )
 

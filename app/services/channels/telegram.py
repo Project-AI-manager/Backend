@@ -182,7 +182,7 @@ async def process_telegram_webhook(
     tenant = await session.get(Tenant, channel.tenant_id)
     ai_config = await session.get(TenantAIConfig, channel.tenant_id)
     service = MLMessageService(
-        retriever=get_memory_retriever(session),
+        retriever=await get_memory_retriever(session, channel.tenant_id),
         llm=get_llm(ai_config.llm_provider if ai_config else "mock"),
     )
     history = await _conversation_history(session, conversation.id, exclude_message_id=inbound.id)
