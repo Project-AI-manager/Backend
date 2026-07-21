@@ -179,6 +179,59 @@ async def process_telegram_webhook(
     session.add(inbound)
     await session.flush()
 
+    result = await process_telegram_inbound_message(session, inbound.id)
+    event.processed = True
+    await session.commit()
+    result.channel_id = channel.id
+    return result
+
+
+async def process_telegram_inbound_message(
+    session: AsyncSession,
+    message_id: UUID,
+) -> ChannelWebhookResponse:
+    """Run ML decisioning for an already persisted Telegram inbound message.
+
+    The stable ``ai:<inbound id>`` external id and the decision marker on the
+    inbound message make completed database work idempotent. Telegram delivery
+    remains at-least-once if a process dies between the API call and DB commit.
+    """
+    inbound = await session.get(Message, message_id)
+    if (
+        inbound is None
+        or inbound.direction != "inbound"
+        or inbound.sender_type != "customer"
+        or (inbound.ai_meta or {}).get("source") != "telegram"
+    ):
+        raise ValueError("Telegram inbound message not found")
+
+    conversation = await session.get(Conversation, inbound.conversation_id)
+    if conversation is None:
+        raise ValueError("Conversation for Telegram inbound message not found")
+    channel = await session.get(Channel, conversation.channel_id)
+    if channel is None or channel.type != "telegram":
+        raise ValueError("Telegram channel for inbound message not found")
+
+    external_outbound_id = f"ai:{inbound.id}"
+    existing_result = await session.execute(
+        select(Message).where(
+            Message.conversation_id == conversation.id,
+            Message.external_message_id == external_outbound_id,
+        )
+    )
+    existing_outbound = existing_result.scalar_one_or_none()
+    stored_decision = str((inbound.ai_meta or {}).get("decision") or "")
+    if existing_outbound is not None or stored_decision == "escalate":
+        return ChannelWebhookResponse(
+            ok=True,
+            duplicate=True,
+            channel_id=channel.id,
+            conversation_id=conversation.id,
+            inbound_message_id=inbound.id,
+            outbound_message_id=existing_outbound.id if existing_outbound else None,
+            decision="auto_reply" if existing_outbound else "escalate",
+        )
+
     tenant = await session.get(Tenant, channel.tenant_id)
     ai_config = await session.get(TenantAIConfig, channel.tenant_id)
     service = MLMessageService(
@@ -189,7 +242,7 @@ async def process_telegram_webhook(
     answer = await service.answer(
         MLAnswerInput(
             tenant_id=channel.tenant_id,
-            message=normalized.text,
+            message=inbound.text,
             history=tuple(history),
             profile=AssistantProfile(company_name=tenant.name if tenant else "компания клиента"),
             custom_system_prompt=ai_config.system_prompt if ai_config else "",
@@ -208,7 +261,7 @@ async def process_telegram_webhook(
             sender_user_id=None,
             text=answer.answer,
             attachments={},
-            external_message_id=f"ai:{inbound.id}",
+            external_message_id=external_outbound_id,
             status="sent",
             confidence=answer.confidence,
             ai_meta={
@@ -221,7 +274,7 @@ async def process_telegram_webhook(
         conversation.status = "auto"
         delivered = await send_telegram_message(
             channel,
-            normalized.external_conversation_id,
+            _message_chat_id(inbound),
             answer.answer,
         )
         if delivered:
@@ -229,10 +282,23 @@ async def process_telegram_webhook(
     else:
         conversation.status = "escalated"
 
+    inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": answer.decision}
+
+    update_id = str(inbound.external_message_id or "").partition(":")[0]
+    if update_id:
+        event_result = await session.execute(
+            select(WebhookEvent).where(
+                WebhookEvent.channel_id == channel.id,
+                WebhookEvent.external_event_id == update_id,
+            )
+        )
+        event = event_result.scalar_one_or_none()
+        if event is not None:
+            event.processed = True
+
     conversation.last_message_at = datetime.now(UTC)
-    conversation.last_message_preview = normalized.text
+    conversation.last_message_preview = inbound.text
     conversation.unread_count += 1
-    event.processed = True
     await session.commit()
     await session.refresh(inbound)
     if outbound is not None:
@@ -264,6 +330,13 @@ def _channel_response(channel: Channel) -> ChannelResponse:
         created_at=channel.created_at,
         updated_at=channel.updated_at,
     )
+
+
+def _message_chat_id(message: Message) -> str:
+    chat_id = (message.ai_meta or {}).get("chat_id")
+    if chat_id is None or not str(chat_id).strip():
+        raise ValueError("Telegram chat id is missing from inbound message")
+    return str(chat_id)
 
 
 def _store_bot_token(token: str) -> str:

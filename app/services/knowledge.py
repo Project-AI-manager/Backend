@@ -342,6 +342,78 @@ async def _index_chunks(
             raise
 
 
+async def reindex_kb_document(session: AsyncSession, document_id: uuid.UUID) -> int | None:
+    """Replace one document's vector points and return the indexed chunk count.
+
+    The operation is deliberately safe to retry: existing points are deleted by
+    tenant/document filter and chunks keep stable point ids. ``None`` means that
+    the document disappeared before a queued job started; archived documents are
+    a successful no-op.
+    """
+    document = await session.get(KbDocument, document_id)
+    if document is None:
+        return None
+    if document.status == "archived":
+        return 0
+
+    document.status = "processing"
+    await session.commit()
+
+    result = await session.execute(
+        select(KbChunk)
+        .where(
+            KbChunk.tenant_id == document.tenant_id,
+            KbChunk.document_id == document.id,
+            KbChunk.version == document.version,
+        )
+        .order_by(KbChunk.position)
+    )
+    chunks = list(result.scalars().all())
+
+    try:
+        vector_store = get_vector_store()
+        if vector_store is not None:
+            await vector_store.delete_document(
+                tenant_id=document.tenant_id,
+                document_id=document.id,
+            )
+            if chunks:
+                embedder = get_embedder()
+                vectors = await embedder.embed(
+                    [
+                        f"{document.title}\n\n{chunk.text}\n\n{_tags_text(chunk.tags)}"
+                        for chunk in chunks
+                    ]
+                )
+                await vector_store.upsert_chunks(
+                    [
+                        VectorPoint(
+                            chunk_id=chunk.id,
+                            vector_id=chunk.vector_id or str(chunk.id),
+                            tenant_id=chunk.tenant_id,
+                            document_id=chunk.document_id,
+                            title=document.title,
+                            text=chunk.text,
+                            tags={
+                                str(key): str(value)
+                                for key, value in (chunk.tags or {}).items()
+                            },
+                            version=chunk.version,
+                            vector=vector,
+                        )
+                        for chunk, vector in zip(chunks, vectors, strict=True)
+                    ]
+                )
+    except Exception:
+        document.status = "failed"
+        await session.commit()
+        raise
+
+    document.status = "ready"
+    await session.commit()
+    return len(chunks)
+
+
 def _tags_text(tags: dict | None) -> str:
     return " ".join(str(value) for value in (tags or {}).values())
 
