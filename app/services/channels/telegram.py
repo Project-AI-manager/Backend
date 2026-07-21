@@ -25,7 +25,7 @@ from app.schemas.channels import (
 )
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 from app.services.ml.contracts import AssistantProfile, ChatRole, ChatTurn, MLAnswerInput
-from app.services.ml.memory import DatabaseMemoryRetriever
+from app.services.ml.memory import get_memory_retriever
 from app.services.ml.service import MLMessageService
 from app.services.rag.llm import get_llm
 
@@ -182,7 +182,7 @@ async def process_telegram_webhook(
     tenant = await session.get(Tenant, channel.tenant_id)
     ai_config = await session.get(TenantAIConfig, channel.tenant_id)
     service = MLMessageService(
-        retriever=DatabaseMemoryRetriever(session),
+        retriever=get_memory_retriever(session),
         llm=get_llm(ai_config.llm_provider if ai_config else "mock"),
     )
     history = await _conversation_history(session, conversation.id, exclude_message_id=inbound.id)

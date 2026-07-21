@@ -23,6 +23,7 @@ from app.models.conversation import Conversation, Customer
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.services.rag.vector_store import VectorPoint
 
 TENANT_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222001")
@@ -30,6 +31,32 @@ CHANNEL_ID = uuid.UUID("22222222-2222-4222-8222-222222222010")
 CUSTOMER_ID = uuid.UUID("22222222-2222-4222-8222-222222222020")
 CONVERSATION_ID = uuid.UUID("22222222-2222-4222-8222-222222222030")
 CANDIDATE_ID = uuid.UUID("22222222-2222-4222-8222-222222222040")
+
+
+class CapturingVectorStore:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.upserted: list[VectorPoint] = []
+
+    async def ensure_collection(self) -> None:
+        return None
+
+    async def upsert_chunks(self, points: list[VectorPoint]) -> None:
+        if self.fail:
+            raise RuntimeError("index unavailable")
+        self.upserted.extend(points)
+
+    async def search(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        vector: list[float],
+        limit: int,
+    ) -> list[object]:
+        return []
+
+    async def delete_document(self, *, tenant_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        return None
 
 
 def create_table(sync_connection: Connection, table: object) -> None:
@@ -200,6 +227,61 @@ def test_create_and_list_knowledge_documents(
 
     assert archived.status_code == 200, archived.text
     assert archived.json()["document"]["status"] == "archived"
+
+
+def test_create_knowledge_document_indexes_vector_chunks(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vector_store = CapturingVectorStore()
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: vector_store)
+    asyncio.run(seed_tenant(session_factory))
+
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={
+            "title": "Vector FAQ",
+            "source_type": "manual",
+            "text": "Vector search should index this chunk.",
+            "tags": {"topic": "rag"},
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    assert len(vector_store.upserted) == 1
+    point = vector_store.upserted[0]
+    assert point.tenant_id == TENANT_ID
+    assert point.title == "Vector FAQ"
+    assert point.tags == {"topic": "rag"}
+    assert any(value != 0 for value in point.vector)
+
+
+def test_create_knowledge_document_survives_vector_index_failure(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.knowledge.get_vector_store",
+        lambda: CapturingVectorStore(fail=True),
+    )
+    asyncio.run(seed_tenant(session_factory))
+
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={
+            "title": "Fallback FAQ",
+            "source_type": "manual",
+            "text": "SQL knowledge base remains available.",
+            "tags": {"topic": "fallback"},
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    assert created.json()["status"] == "ready"
 
 
 def test_list_and_approve_knowledge_candidate(

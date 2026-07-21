@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import log
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
@@ -22,6 +23,8 @@ from app.schemas.knowledge import (
     KnowledgeDocumentResponse,
     KnowledgeDocumentStatusResponse,
 )
+from app.services.rag.embeddings import get_embedder
+from app.services.rag.vector_store import VectorPoint, get_vector_store
 
 MAX_CHUNK_CHARS = 1200
 
@@ -95,11 +98,12 @@ async def create_kb_document(
     session.add(document)
     await session.flush()
 
-    chunks = split_text_into_chunks(body.text)
-    await _add_chunks(session, tenant_id, document, chunks, body.tags)
+    chunk_texts = split_text_into_chunks(body.text)
+    chunks = await _add_chunks(session, tenant_id, document, chunk_texts, body.tags)
     await session.commit()
     await session.refresh(document)
-    return _document_response(document, len(chunks))
+    await _index_chunks(document=document, chunks=chunks)
+    return _document_response(document, len(chunk_texts))
 
 
 async def get_kb_document(
@@ -124,6 +128,17 @@ async def archive_kb_document(
     document_id: uuid.UUID,
 ) -> KnowledgeDocumentStatusResponse:
     document = await _get_document(session, tenant_id, document_id)
+    vector_store = get_vector_store()
+    if vector_store is not None:
+        try:
+            await vector_store.delete_document(tenant_id=tenant_id, document_id=document.id)
+        except Exception as exc:  # noqa: BLE001 - SQL status remains the source of truth.
+            log.warning(
+                "knowledge_vector_delete_failed",
+                error=str(exc),
+                tenant_id=str(tenant_id),
+                document_id=str(document.id),
+            )
     document.status = "archived"
     await session.commit()
     await session.refresh(document)
@@ -156,6 +171,7 @@ async def approve_kb_candidate(
     if candidate.resulting_document_id:
         document = await session.get(KbDocument, candidate.resulting_document_id)
 
+    chunks: list[KbChunk] = []
     if candidate.status != "approved" or document is None:
         document = KbDocument(
             tenant_id=tenant_id,
@@ -167,7 +183,7 @@ async def approve_kb_candidate(
         )
         session.add(document)
         await session.flush()
-        await _add_chunks(
+        chunks = await _add_chunks(
             session,
             tenant_id,
             document,
@@ -180,6 +196,8 @@ async def approve_kb_candidate(
     await session.commit()
     await session.refresh(candidate)
     await session.refresh(document)
+    if chunks:
+        await _index_chunks(document=document, chunks=chunks)
     chunks_count = await _chunk_count(session, tenant_id, document.id)
     base = _candidate_response(candidate)
     return KnowledgeCandidateApproveResponse(
@@ -210,20 +228,62 @@ async def _add_chunks(
     document: KbDocument,
     chunks: Sequence[str],
     tags: dict[str, str],
-) -> None:
+) -> list[KbChunk]:
+    created: list[KbChunk] = []
     for position, chunk_text in enumerate(chunks):
-        session.add(
-            KbChunk(
-                tenant_id=tenant_id,
-                document_id=document.id,
-                text=chunk_text,
-                position=position,
-                token_count=len(chunk_text.split()),
-                vector_id=f"kb:{document.id}:{position}",
-                tags=tags,
-                version=document.version,
-            )
+        chunk = KbChunk(
+            tenant_id=tenant_id,
+            document_id=document.id,
+            text=chunk_text,
+            position=position,
+            token_count=len(chunk_text.split()),
+            vector_id=f"kb:{document.id}:{position}",
+            tags=tags,
+            version=document.version,
         )
+        session.add(chunk)
+        created.append(chunk)
+    await session.flush()
+    return created
+
+
+async def _index_chunks(*, document: KbDocument, chunks: Sequence[KbChunk]) -> None:
+    vector_store = get_vector_store()
+    if vector_store is None or not chunks:
+        return
+
+    try:
+        embedder = get_embedder()
+        vectors = await embedder.embed(
+            [f"{document.title}\n\n{chunk.text}\n\n{_tags_text(chunk.tags)}" for chunk in chunks]
+        )
+        await vector_store.upsert_chunks(
+            [
+                VectorPoint(
+                    chunk_id=chunk.id,
+                    vector_id=chunk.vector_id or str(chunk.id),
+                    tenant_id=chunk.tenant_id,
+                    document_id=chunk.document_id,
+                    title=document.title,
+                    text=chunk.text,
+                    tags={str(key): str(value) for key, value in (chunk.tags or {}).items()},
+                    version=chunk.version,
+                    vector=vector,
+                )
+                for chunk, vector in zip(chunks, vectors, strict=True)
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001 - SQL knowledge base must remain usable.
+        log.warning(
+            "knowledge_vector_index_failed",
+            error=str(exc),
+            document_id=str(document.id),
+            tenant_id=str(document.tenant_id),
+        )
+
+
+def _tags_text(tags: dict | None) -> str:
+    return " ".join(str(value) for value in (tags or {}).values())
 
 
 async def _chunk_count(session: AsyncSession, tenant_id: uuid.UUID, document_id: uuid.UUID) -> int:
