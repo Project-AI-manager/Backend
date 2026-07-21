@@ -24,6 +24,7 @@ from app.models.conversation import Conversation, Customer, CustomerIdentity, Me
 from app.models.knowledge import KbChunk, KbDocument
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User
+from app.services.channels.telegram import process_telegram_inbound_message
 
 TENANT_ID = uuid.UUID("44444444-4444-4444-8444-444444444401")
 USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444402")
@@ -274,6 +275,29 @@ def test_telegram_webhook_is_idempotent(
     assert second.json()["duplicate"] is True
     assert asyncio.run(count_rows(session_factory, Message)) == 2
     assert asyncio.run(count_rows(session_factory, WebhookEvent)) == 1
+
+
+def test_completed_inbound_worker_is_idempotent(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    response = client.post("/api/v1/channels/webhook/telegram", json=telegram_payload())
+    inbound_message_id = uuid.UUID(response.json()["inbound_message_id"])
+
+    async def retry_job() -> None:
+        async with session_factory() as session:
+            result = await process_telegram_inbound_message(session, inbound_message_id)
+            assert result.duplicate is True
+            assert result.decision == "auto_reply"
+
+    asyncio.run(retry_job())
+    assert asyncio.run(count_rows(session_factory, Message)) == 2
 
 
 def test_telegram_webhook_secret_selects_channel(
