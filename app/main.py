@@ -15,6 +15,9 @@ from app.core.logging import configure_logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    del app
+    # Re-run safeguards here so mutated or dynamically supplied settings fail before serving.
+    settings.assert_safe_runtime()
     configure_logging()
     # TODO: прогреть подключения (Qdrant, Redis) при старте
     yield

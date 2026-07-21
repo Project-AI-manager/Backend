@@ -29,6 +29,19 @@ uv run uvicorn app.main:app --reload
 ```
 Конфиг — через `.env` (см. `.env.example`). AI-слой и каналы на старте работают на заглушках (`MockLLM`, локальные эмбеддинги).
 
+## Безопасность и роли
+
+При `APP_ENV`, отличном от `local` и `test`, приложение не запустится с:
+
+- дефолтным/коротким `SECRET_KEY` (минимум 32 символа);
+- wildcard `CORS_ORIGINS=*`;
+- `EMAIL_DEV_MODE=true` или SQLite;
+- `EMAIL_SEND_ENABLED=true` без `SMTP_HOST`.
+
+Менеджеры могут работать с диалогами, но просмотр и подключение каналов, изменение AI/workspace-настроек, список команды, email outbox и диагностика интеграций доступны только `owner|admin`.
+
+Telegram получает уникальный `webhook_path` при подключении канала. В production входящие update принимаются только с этим secret в URL или в заголовке `X-Telegram-Bot-Api-Secret-Token`. Маршрут без secret оставлен только для local/test совместимости и может быть отключён через `TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK=false`.
+
 ## Быстрый локальный запуск без Docker
 Если на машине нет Docker/PostgreSQL, можно поднять песочницу на SQLite:
 

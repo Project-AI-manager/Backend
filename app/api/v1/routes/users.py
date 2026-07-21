@@ -5,7 +5,7 @@ from typing import cast
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import AdminUser, CurrentUser, SessionDep
 from app.models.user import User
 from app.schemas.auth import UserMeResponse
 
@@ -30,7 +30,7 @@ async def me(user: CurrentUser, session: SessionDep) -> UserMeResponse:
 
 
 @router.get("", response_model=list[UserMeResponse])
-async def list_team(user: CurrentUser, session: SessionDep) -> list[UserMeResponse]:
+async def list_team(user: AdminUser, session: SessionDep) -> list[UserMeResponse]:
     tenant_id = user.get("tenant_id")
     if not tenant_id:
         return []

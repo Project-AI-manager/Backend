@@ -70,8 +70,8 @@ def client(
         app.dependency_overrides.pop(get_session, None)
 
 
-def auth_headers() -> dict[str, str]:
-    token = create_token(USER_ID, tenant_id=TENANT_ID, role="owner")
+def auth_headers(role: str = "owner") -> dict[str, str]:
+    token = create_token(USER_ID, tenant_id=TENANT_ID, role=role)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -80,6 +80,7 @@ async def seed_tenant(
     *,
     with_ai_config: bool = True,
     with_billing: bool = False,
+    role: str = "owner",
 ) -> None:
     async with session_factory() as session:
         session.add(Tenant(id=TENANT_ID, name="ООО Север", slug="sever", status="active"))
@@ -89,7 +90,7 @@ async def seed_tenant(
                 tenant_id=TENANT_ID,
                 email="owner@example.com",
                 full_name="Owner",
-                role="owner",
+                role=role,
                 password_hash="test-password-hash",
                 status="active",
             )
@@ -188,6 +189,30 @@ def test_update_ai_settings_rejects_unknown_provider(
     assert detail["code"] == "unsupported_llm_provider"
     assert detail["message"] == detail["msg"]
     assert "mock" in detail["available_providers"]
+
+
+def test_manager_can_read_but_cannot_update_sensitive_settings(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory, role="manager"))
+    headers = auth_headers(role="manager")
+
+    read_response = client.get("/api/v1/settings/ai", headers=headers)
+    ai_response = client.put(
+        "/api/v1/settings/ai",
+        headers=headers,
+        json={"auto_reply_enabled": True},
+    )
+    workspace_response = client.put(
+        "/api/v1/settings/workspace",
+        headers=headers,
+        json={"name": "Unauthorized rename"},
+    )
+
+    assert read_response.status_code == 200
+    assert ai_response.status_code == 403
+    assert workspace_response.status_code == 403
 
 
 def test_workspace_settings_read_and_update_company_name(
