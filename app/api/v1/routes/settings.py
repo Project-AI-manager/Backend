@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
+from app.api.deps import AdminUser, CurrentUser, SessionDep, tenant_id_from_user
 from app.models.ops import Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant, TenantAIConfig
 from app.schemas.settings import (
@@ -33,7 +33,7 @@ async def get_ai_settings(user: CurrentUser, session: SessionDep) -> AISettingsR
 @router.put("/ai", response_model=AISettingsResponse)
 async def update_ai_settings(
     body: AISettingsUpdate,
-    user: CurrentUser,
+    user: AdminUser,
     session: SessionDep,
 ) -> AISettingsResponse:
     config = await _get_or_create_ai_config(session, tenant_id_from_user(user))
@@ -76,7 +76,7 @@ async def get_workspace_settings(
 @router.put("/workspace", response_model=WorkspaceSettingsResponse)
 async def update_workspace_settings(
     body: WorkspaceSettingsUpdate,
-    user: CurrentUser,
+    user: AdminUser,
     session: SessionDep,
 ) -> WorkspaceSettingsResponse:
     tenant = await _get_tenant(session, tenant_id_from_user(user))

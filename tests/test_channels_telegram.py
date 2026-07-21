@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.schema import Table
 
+from app.core.config import settings
 from app.core.security import create_token, hash_password
 from app.db.session import get_session
 from app.main import app
@@ -77,8 +78,8 @@ def client(
         app.dependency_overrides.pop(get_session, None)
 
 
-def auth_headers() -> dict[str, str]:
-    token = create_token(USER_ID, tenant_id=TENANT_ID, role="owner")
+def auth_headers(role: str = "owner") -> dict[str, str]:
+    token = create_token(USER_ID, tenant_id=TENANT_ID, role=role)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -86,6 +87,7 @@ async def seed_tenant(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     auto_reply_enabled: bool = True,
+    role: str = "owner",
 ) -> None:
     async with session_factory() as session:
         tenant = Tenant(id=TENANT_ID, name="ООО Север", slug="sever", status="active")
@@ -96,7 +98,7 @@ async def seed_tenant(
                 tenant_id=TENANT_ID,
                 email="owner@example.com",
                 full_name="Owner",
-                role="owner",
+                role=role,
                 password_hash=hash_password("demo-password"),
                 status="active",
             )
@@ -200,6 +202,23 @@ def test_connect_and_list_telegram_channel(
 
     assert listed.status_code == 200
     assert listed.json()[0]["id"] == data["id"]
+
+
+def test_manager_cannot_connect_telegram_channel(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory, role="manager"))
+
+    listed = client.get("/api/v1/channels", headers=auth_headers(role="manager"))
+    response = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(role="manager"),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+
+    assert listed.status_code == 403
+    assert response.status_code == 403
 
 
 def test_telegram_webhook_creates_conversation_and_auto_reply(
@@ -313,6 +332,38 @@ def test_telegram_webhook_secret_selects_channel(
     assert without_secret.status_code == 400
     assert response.status_code == 200, response.text
     assert response.json()["decision"] == "auto_reply"
+
+
+def test_secretless_telegram_webhook_is_closed_outside_local_test(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    created = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    webhook_path = created.json()["settings"]["webhook_path"]
+    webhook_secret = webhook_path.rsplit("/", 1)[1]
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+
+    closed = client.post("/api/v1/channels/webhook/telegram", json=telegram_payload())
+    accepted = client.post(
+        "/api/v1/channels/webhook/telegram",
+        headers={"X-Telegram-Bot-Api-Secret-Token": webhook_secret},
+        json=telegram_payload(update_id=1004),
+    )
+    mismatch = client.post(
+        webhook_path,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "wrong-secret"},
+        json=telegram_payload(update_id=1005),
+    )
+
+    assert closed.status_code == 404
+    assert accepted.status_code == 200, accepted.text
+    assert mismatch.status_code == 401
 
 
 def test_telegram_webhook_escalates_without_auto_reply(

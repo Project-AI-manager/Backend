@@ -1,10 +1,12 @@
 """Email module API tests."""
 
+import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -71,6 +73,16 @@ def register(client: TestClient) -> dict:
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+async def set_role(
+    session_factory: async_sessionmaker[AsyncSession],
+    role: str,
+) -> None:
+    async with session_factory() as session:
+        user = (await session.execute(select(User))).scalar_one()
+        user.role = role
+        await session.commit()
 
 
 def test_email_status_is_public(client: TestClient) -> None:
@@ -145,3 +157,18 @@ def test_password_reset_does_not_disclose_unknown_email(client: TestClient) -> N
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["dev_token"] is None
+
+
+def test_manager_cannot_read_email_outbox(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tokens = register(client)
+    asyncio.run(set_role(session_factory, "manager"))
+
+    response = client.get(
+        "/api/v1/email/outbox",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+
+    assert response.status_code == 403

@@ -1,17 +1,88 @@
 """Integration diagnostics tests."""
 
-from typing import Any
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator, Generator
+from typing import Any, cast
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.schema import Table
 
 from app.core.config import settings
+from app.core.security import create_token
+from app.db.session import get_session
 from app.main import app
+from app.models.tenant import Tenant
+from app.models.user import User
+
+TENANT_ID = uuid.UUID("99999999-9999-4999-8999-999999999901")
+USER_ID = uuid.UUID("99999999-9999-4999-8999-999999999902")
 
 
-def test_integrations_health_reports_local_defaults() -> None:
-    response = TestClient(app).get("/api/v1/integrations/health")
+def create_table(sync_connection: Connection, table: Table) -> None:
+    table.create(sync_connection)
+
+
+@pytest.fixture()
+async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(create_table, cast(Table, Tenant.__table__))
+        await conn.run_sync(create_table, cast(Table, User.__table__))
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(Tenant(id=TENANT_ID, name="Test", slug="test", status="active"))
+        session.add(
+            User(
+                id=USER_ID,
+                tenant_id=TENANT_ID,
+                email="owner@example.com",
+                full_name="Owner",
+                role="owner",
+                password_hash="hash",
+                status="active",
+            )
+        )
+        await session.commit()
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture()
+def client(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Generator[TestClient, None, None]:
+    async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+def auth_headers() -> dict[str, str]:
+    token = create_token(USER_ID, tenant_id=TENANT_ID, role="owner")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_integrations_health_reports_local_defaults(client: TestClient) -> None:
+    response = client.get("/api/v1/integrations/health", headers=auth_headers())
 
     assert response.status_code == 200
     data = response.json()
@@ -22,13 +93,14 @@ def test_integrations_health_reports_local_defaults() -> None:
 
 
 def test_llm_probe_reports_missing_openai_compatible_config(
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "LLM_PROVIDER", "unirouter")
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", "")
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "")
 
-    response = TestClient(app).post("/api/v1/integrations/llm/probe")
+    response = client.post("/api/v1/integrations/llm/probe", headers=auth_headers())
 
     assert response.status_code == 200
     data = response.json()
@@ -37,6 +109,7 @@ def test_llm_probe_reports_missing_openai_compatible_config(
 
 
 def test_llm_probe_calls_openai_compatible_provider(
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -45,7 +118,7 @@ def test_llm_probe_calls_openai_compatible_provider(
         def __init__(self, *, timeout: float) -> None:
             captured["timeout"] = timeout
 
-        async def __aenter__(self) -> "FakeAsyncClient":
+        async def __aenter__(self) -> FakeAsyncClient:
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -74,7 +147,7 @@ def test_llm_probe_calls_openai_compatible_provider(
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MODEL", "cx/gpt-5.4-mini")
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_PROBE_TIMEOUT_SEC", 3.0)
 
-    response = TestClient(app).post("/api/v1/integrations/llm/probe")
+    response = client.post("/api/v1/integrations/llm/probe", headers=auth_headers())
 
     assert response.status_code == 200
     data = response.json()
@@ -85,10 +158,18 @@ def test_llm_probe_calls_openai_compatible_provider(
     assert captured["headers"]["Authorization"] == "Bearer runtime-key"
 
 
-def test_qdrant_health_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qdrant_health_is_disabled_by_default(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "QDRANT_ENABLED", False)
 
-    response = TestClient(app).get("/api/v1/integrations/health")
+    response = client.get("/api/v1/integrations/health", headers=auth_headers())
 
     assert response.status_code == 200
     assert response.json()["qdrant"]["status"] == "disabled"
+
+
+def test_integration_diagnostics_require_authentication(client: TestClient) -> None:
+    assert client.get("/api/v1/integrations/health").status_code == 401
+    assert client.post("/api/v1/integrations/llm/probe").status_code == 401

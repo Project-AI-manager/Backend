@@ -4,7 +4,7 @@ from typing import cast
 
 from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
+from app.api.deps import AdminUser, CurrentUser, SessionDep, tenant_id_from_user
 from app.models.user import User
 from app.schemas.auth import (
     EmailActionResponse,
@@ -65,7 +65,7 @@ async def confirm_reset(
 
 @router.get("/outbox", response_model=list[EmailOutboxResponse])
 async def outbox(
-    user: CurrentUser,
+    user: AdminUser,
     session: SessionDep,
 ) -> list[EmailOutboxResponse]:
     return await list_outbox(session, tenant_id_from_user(user))

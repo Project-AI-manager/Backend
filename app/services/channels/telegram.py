@@ -274,7 +274,7 @@ def _webhook_secret(settings: dict | None) -> str:
     existing = (settings or {}).get("webhook_secret")
     if isinstance(existing, str) and existing:
         return existing
-    return secrets.token_urlsafe(24)
+    return secrets.token_urlsafe(32)
 
 
 def _telegram_customer_name(sender: Any, chat: dict[str, Any]) -> str:
@@ -301,7 +301,11 @@ async def _active_telegram_channel(
     channels = result.scalars().all()
     if webhook_secret:
         for channel in channels:
-            if _webhook_secret(channel.settings) == webhook_secret:
+            stored_secret = (channel.settings or {}).get("webhook_secret")
+            if isinstance(stored_secret, str) and secrets.compare_digest(
+                stored_secret,
+                webhook_secret,
+            ):
                 return channel
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Active Telegram channel not found")
     if len(channels) == 1:

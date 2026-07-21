@@ -11,12 +11,13 @@ from app.db.session import get_session
 from app.models.user import User
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+UserContext = dict[str, object]
 
 
 async def get_current_user(
     session: SessionDep,
     authorization: Annotated[str | None, Header()] = None,
-) -> dict:
+) -> UserContext:
     """Декодирует access-JWT и проверяет, что пользователь ещё активен в БД."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
@@ -46,10 +47,25 @@ async def get_current_user(
     return payload
 
 
-CurrentUser = Annotated[dict, Depends(get_current_user)]
+CurrentUser = Annotated[UserContext, Depends(get_current_user)]
 
 
-def tenant_id_from_user(user: dict) -> uuid.UUID:
+def require_role(user: UserContext, *allowed_roles: str) -> None:
+    """Authorize against the current database role, never the stale JWT role claim."""
+    role = str(user.get("role") or "")
+    if role not in allowed_roles:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient permissions")
+
+
+async def get_admin_user(user: CurrentUser) -> UserContext:
+    require_role(user, "owner", "admin")
+    return user
+
+
+AdminUser = Annotated[UserContext, Depends(get_admin_user)]
+
+
+def tenant_id_from_user(user: UserContext) -> uuid.UUID:
     """Return the trusted tenant scope stored in the access token."""
     raw_tenant_id = user.get("tenant_id")
     if not raw_tenant_id:
