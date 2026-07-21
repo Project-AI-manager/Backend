@@ -21,7 +21,7 @@ from app.main import app
 from app.models.channel import Channel
 from app.models.conversation import Conversation, Customer
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
-from app.models.tenant import Tenant
+from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User
 from app.services.rag.vector_store import VectorPoint
 
@@ -73,6 +73,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
     async with engine.begin() as conn:
         for table in (
             Tenant.__table__,
+            TenantAIConfig.__table__,
             User.__table__,
             Channel.__table__,
             Customer.__table__,
@@ -282,6 +283,58 @@ def test_create_knowledge_document_survives_vector_index_failure(
 
     assert created.status_code == 200, created.text
     assert created.json()["status"] == "ready"
+
+
+def test_create_knowledge_document_uses_tenant_embedding_model(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vector_store = CapturingVectorStore()
+    configured_models: list[str | None] = []
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    def fake_get_embedder(model: str | None = None) -> FakeEmbedder:
+        configured_models.append(model)
+        return FakeEmbedder()
+
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: vector_store)
+    monkeypatch.setattr("app.services.knowledge.get_embedder", fake_get_embedder)
+    asyncio.run(seed_tenant(session_factory))
+
+    async def seed_ai_config() -> None:
+        async with session_factory() as session:
+            session.add(
+                TenantAIConfig(
+                    tenant_id=TENANT_ID,
+                    auto_reply_enabled=False,
+                    confidence_threshold=80,
+                    llm_provider="mock",
+                    embedding_model="tenant-embedding-model",
+                    system_prompt="",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed_ai_config())
+
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={
+            "title": "Tenant model FAQ",
+            "source_type": "manual",
+            "text": "Use the model configured for this tenant.",
+            "tags": {},
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    assert configured_models == ["tenant-embedding-model"]
+    assert vector_store.upserted[0].vector == [1.0, 0.0]
 
 
 def test_list_and_approve_knowledge_candidate(

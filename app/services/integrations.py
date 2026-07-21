@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.schemas.integrations import IntegrationProbeResponse, IntegrationsHealthResponse
+from app.services.rag.embeddings import (
+    EmbeddingProviderConfigurationError,
+    EmbeddingProviderRequestError,
+    get_embedder,
+)
 from app.services.rag.llm import (
     LLMProviderConfigurationError,
     LLMProviderRequestError,
@@ -23,9 +28,60 @@ def _mask(value: str, *, visible: int = 6) -> str:
 async def integrations_health(*, probe_llm: bool = False) -> IntegrationsHealthResponse:
     return IntegrationsHealthResponse(
         llm=await probe_llm_provider(probe=probe_llm),
+        embeddings=await probe_embedding_provider(probe=False),
         qdrant=await probe_qdrant(),
         email=probe_email(),
         telegram=probe_telegram(),
+    )
+
+
+async def probe_embedding_provider(*, probe: bool = True) -> IntegrationProbeResponse:
+    provider_name = settings.EMBEDDING_PROVIDER.strip().lower()
+    details = {
+        "provider": provider_name,
+        "base_url": settings.EMBEDDING_BASE_URL,
+        "model": settings.EMBEDDING_MODEL,
+        "dimension": settings.EMBEDDING_DIMENSION,
+        "api_key": _mask(settings.EMBEDDING_API_KEY),
+    }
+    try:
+        embedder = get_embedder(
+            timeout_sec=settings.EMBEDDING_PROBE_TIMEOUT_SEC,
+        )
+    except EmbeddingProviderConfigurationError as exc:
+        return IntegrationProbeResponse(
+            name="embeddings",
+            status="not_configured",
+            message=str(exc),
+            details=details,
+        )
+
+    if not probe:
+        return IntegrationProbeResponse(
+            name="embeddings",
+            status="ok",
+            message=(
+                "Deterministic local embeddings are active"
+                if embedder.provider_name == "local"
+                else "OpenAI-compatible embedding provider is configured"
+            ),
+            details=details,
+        )
+
+    try:
+        [vector] = await embedder.embed(["embedding health check"])
+    except (EmbeddingProviderConfigurationError, EmbeddingProviderRequestError) as exc:
+        return IntegrationProbeResponse(
+            name="embeddings",
+            status="error",
+            message=str(exc),
+            details=details,
+        )
+    return IntegrationProbeResponse(
+        name="embeddings",
+        status="ok",
+        message="Embedding provider returned a valid vector",
+        details={**details, "returned_dimension": len(vector)},
     )
 
 

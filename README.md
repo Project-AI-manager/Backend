@@ -42,6 +42,19 @@ uv run uvicorn app.main:app --reload
 
 Telegram получает уникальный `webhook_path` при подключении канала. В production входящие update принимаются только с этим secret в URL или в заголовке `X-Telegram-Bot-Api-Secret-Token`. Маршрут без secret оставлен только для local/test совместимости и может быть отключён через `TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK=false`.
 
+## Embeddings и переиндексация
+
+OpenAI-compatible embeddings use `EMBEDDING_PROVIDER=openai-compatible` and the
+`EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and
+`EMBEDDING_DIMENSION` variables. `EMBEDDING_DIMENSION` must match the selected model
+and the Qdrant collection. After changing the model or dimension, point
+`QDRANT_COLLECTION` at a new collection (recommended) and run:
+
+```bash
+uv run python -m app.db.reindex
+# optionally limit the rebuild: --tenant-id <uuid>
+```
+
 ## Быстрый локальный запуск без Docker
 Если на машине нет Docker/PostgreSQL, можно поднять песочницу на SQLite:
 

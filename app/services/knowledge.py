@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import log
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
+from app.models.tenant import TenantAIConfig
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
     KnowledgeCandidateResponse,
@@ -102,7 +103,7 @@ async def create_kb_document(
     chunks = await _add_chunks(session, tenant_id, document, chunk_texts, body.tags)
     await session.commit()
     await session.refresh(document)
-    await _index_chunks(document=document, chunks=chunks)
+    await _index_chunks(session=session, document=document, chunks=chunks)
     return _document_response(document, len(chunk_texts))
 
 
@@ -197,7 +198,7 @@ async def approve_kb_candidate(
     await session.refresh(candidate)
     await session.refresh(document)
     if chunks:
-        await _index_chunks(document=document, chunks=chunks)
+        await _index_chunks(session=session, document=document, chunks=chunks)
     chunks_count = await _chunk_count(session, tenant_id, document.id)
     base = _candidate_response(candidate)
     return KnowledgeCandidateApproveResponse(
@@ -247,13 +248,70 @@ async def _add_chunks(
     return created
 
 
-async def _index_chunks(*, document: KbDocument, chunks: Sequence[KbChunk]) -> None:
+async def index_kb_document(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> int:
+    """Replace one document's Qdrant points using the configured embedding contract."""
+    document = await _get_document(session, tenant_id, document_id)
+    if document.status != "ready":
+        return 0
+    result = await session.execute(
+        select(KbChunk)
+        .where(KbChunk.tenant_id == tenant_id, KbChunk.document_id == document_id)
+        .order_by(KbChunk.position)
+    )
+    chunks = list(result.scalars().all())
+    vector_store = get_vector_store()
+    if vector_store is None:
+        raise RuntimeError("Qdrant is disabled; set QDRANT_ENABLED=true before reindexing")
+    # Build and validate replacement vectors before deleting the currently searchable points.
+    # Qdrant upsert replaces stable chunk IDs, so deletion is unnecessary for current chunks.
+    await _index_chunks(
+        session=session,
+        document=document,
+        chunks=chunks,
+        raise_errors=True,
+    )
+    return len(chunks)
+
+
+async def reindex_ready_documents(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID | None = None,
+) -> tuple[int, int]:
+    """Reindex ready knowledge documents; return ``(documents, chunks)``."""
+    query = select(KbDocument.id, KbDocument.tenant_id).where(KbDocument.status == "ready")
+    if tenant_id is not None:
+        query = query.where(KbDocument.tenant_id == tenant_id)
+    rows = (await session.execute(query.order_by(KbDocument.created_at))).all()
+    chunks = 0
+    for document_id, row_tenant_id in rows:
+        chunks += await index_kb_document(
+            session,
+            tenant_id=row_tenant_id,
+            document_id=document_id,
+        )
+    return len(rows), chunks
+
+
+async def _index_chunks(
+    *,
+    session: AsyncSession,
+    document: KbDocument,
+    chunks: Sequence[KbChunk],
+    raise_errors: bool = False,
+) -> None:
     vector_store = get_vector_store()
     if vector_store is None or not chunks:
         return
 
     try:
-        embedder = get_embedder()
+        ai_config = await session.get(TenantAIConfig, document.tenant_id)
+        embedder = get_embedder(ai_config.embedding_model if ai_config else None)
         vectors = await embedder.embed(
             [f"{document.title}\n\n{chunk.text}\n\n{_tags_text(chunk.tags)}" for chunk in chunks]
         )
@@ -280,6 +338,8 @@ async def _index_chunks(*, document: KbDocument, chunks: Sequence[KbChunk]) -> N
             document_id=str(document.id),
             tenant_id=str(document.tenant_id),
         )
+        if raise_errors:
+            raise
 
 
 def _tags_text(tags: dict | None) -> str:
@@ -355,5 +415,12 @@ def _candidate_document_title(question: str) -> str:
 
 
 async def ingest_document(tenant_id: str, document_id: str) -> int:
-    """Placeholder for future parser -> embedding -> Qdrant indexing."""
-    raise NotImplementedError
+    """Compatibility entry point for workers and scripts."""
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        return await index_kb_document(
+            session,
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id),
+        )

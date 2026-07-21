@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 import uuid
 from collections.abc import AsyncGenerator, Sequence
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
+import httpx
 import pytest
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -16,8 +18,13 @@ from sqlalchemy.sql.schema import Table
 from app.models.knowledge import KbChunk, KbDocument
 from app.models.tenant import Tenant
 from app.services.ml.memory import VectorMemoryRetriever
-from app.services.rag.embeddings import VECTOR_DIM, LocalEmbedding
-from app.services.rag.vector_store import VectorPoint, VectorSearchHit
+from app.services.rag.embeddings import (
+    VECTOR_DIM,
+    EmbeddingProviderRequestError,
+    LocalEmbedding,
+    OpenAICompatibleEmbedding,
+)
+from app.services.rag.vector_store import QdrantVectorStore, VectorPoint, VectorSearchHit
 
 TENANT_A = uuid.UUID("55555555-5555-4555-8555-555555555501")
 TENANT_B = uuid.UUID("55555555-5555-4555-8555-555555555502")
@@ -97,6 +104,115 @@ async def test_local_embedding_is_deterministic_non_zero_and_normalized() -> Non
     assert any(value != 0 for value in first)
     assert empty == [0.0] * VECTOR_DIM
     assert math.isclose(math.sqrt(sum(value * value for value in first)), 1.0, abs_tol=0.0001)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_embeddings_use_contract_and_restore_input_order() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers["authorization"]
+        captured["payload"] = request.read().decode()
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 1, "embedding": [0.0, 1.0, 0.0]},
+                    {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                ]
+            },
+        )
+
+    embedder = OpenAICompatibleEmbedding(
+        base_url="https://embeddings.example.test/v1/",
+        api_key="secret-token",
+        model="multilingual-e5",
+        dimension=3,
+        timeout_sec=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    vectors = await embedder.embed(["first", "second"])
+
+    assert vectors == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    assert captured["url"] == "https://embeddings.example.test/v1/embeddings"
+    assert captured["auth"] == "Bearer secret-token"
+    assert '"model":"multilingual-e5"' in str(captured["payload"])
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_embeddings_reject_dimension_mismatch() -> None:
+    embedder = OpenAICompatibleEmbedding(
+        base_url="https://embeddings.example.test/v1",
+        api_key="secret-token",
+        model="small",
+        dimension=3,
+        timeout_sec=2,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]},
+            )
+        ),
+    )
+
+    with pytest.raises(EmbeddingProviderRequestError, match="dimension mismatch"):
+        await embedder.embed(["wrong dimension"])
+
+
+class FakeQdrantClient:
+    def __init__(self, *, collection_size: int) -> None:
+        self.collection_size = collection_size
+
+    async def collection_exists(self, collection: str) -> bool:
+        return True
+
+    async def get_collection(self, collection: str) -> object:
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(vectors=SimpleNamespace(size=self.collection_size))
+            )
+        )
+
+
+class CreatingQdrantClient:
+    def __init__(self) -> None:
+        self.vectors_config: Any = None
+
+    async def collection_exists(self, collection: str) -> bool:
+        return False
+
+    async def create_collection(self, *, collection_name: str, vectors_config: object) -> None:
+        self.vectors_config = vectors_config
+
+
+@pytest.mark.asyncio
+async def test_qdrant_rejects_existing_collection_with_wrong_dimension() -> None:
+    store = QdrantVectorStore(
+        url="http://qdrant.test",
+        collection="knowledge",
+        vector_size=3,
+        client=FakeQdrantClient(collection_size=2),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="dimension is 2"):
+        await store.ensure_collection()
+
+
+@pytest.mark.asyncio
+async def test_qdrant_creates_collection_with_configured_dimension() -> None:
+    client = CreatingQdrantClient()
+    store = QdrantVectorStore(
+        url="http://qdrant.test",
+        collection="knowledge",
+        vector_size=3,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    await store.ensure_collection()
+
+    assert client.vectors_config.size == 3
 
 
 @pytest.mark.asyncio
