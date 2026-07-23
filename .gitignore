@@ -5,6 +5,7 @@ __pycache__/
 .venv*/
 .logs/
 .uv/
+.model-cache/
 *.egg-info/
 
 # Env / secrets

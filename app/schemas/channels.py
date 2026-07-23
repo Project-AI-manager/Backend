@@ -34,3 +34,36 @@ class ChannelWebhookResponse(BaseModel):
     inbound_message_id: UUID | None = None
     outbound_message_id: UUID | None = None
     decision: Literal["auto_reply", "escalate"] | None = None
+
+
+class TelegramAccountStartRequest(BaseModel):
+    phone: str = Field(min_length=8, max_length=32)
+
+
+class TelegramAccountStartResponse(BaseModel):
+    channel_id: UUID
+    status: Literal["code_required", "active"]
+
+
+class TelegramAccountConfirmRequest(BaseModel):
+    channel_id: UUID
+    code: str = Field(min_length=3, max_length=16)
+
+
+class TelegramAccountPasswordRequest(BaseModel):
+    channel_id: UUID
+    password: str = Field(min_length=1, max_length=256)
+
+
+class TelegramAccountAuthResponse(BaseModel):
+    channel_id: UUID
+    status: Literal["password_required", "active"]
+    display_name: str = ""
+
+
+class TelegramMTProtoInbound(BaseModel):
+    peer_id: int
+    sender_id: int
+    message_id: int
+    text: str
+    sender_name: str = ""

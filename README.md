@@ -40,9 +40,11 @@ uv run uvicorn app.main:app --reload
 
 Менеджеры могут работать с диалогами, но просмотр и подключение каналов, изменение AI/workspace-настроек, список команды, email outbox и диагностика интеграций доступны только `owner|admin`.
 
-Telegram получает уникальный `webhook_path` при подключении канала. В production входящие update принимаются только с этим secret в URL или в заголовке `X-Telegram-Bot-Api-Secret-Token`. Маршрут без secret оставлен только для local/test совместимости и может быть отключён через `TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK=false`.
+Основной Telegram-контур использует личный аккаунт через MTProto: API запускает OTP/2FA-вход, шифрует session string, а отдельный процесс `python -m app.workers.telegram_listener` слушает входящие сообщения. `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` хранятся только в окружении backend. Старый Bot API webhook сохранён для обратной совместимости тестового MVP, но не является каноническим подключением.
 
 ## Embeddings и переиндексация
+
+Для локальных semantic embeddings используйте `EMBEDDING_PROVIDER=local-ml`, модель `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, размерность `384` и новую Qdrant collection. Модель скачивается один раз в `EMBEDDING_CACHE_DIR` и исполняется на CPU через ONNX/FastEmbed.
 
 OpenAI-compatible embeddings use `EMBEDDING_PROVIDER=openai-compatible` and the
 `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and

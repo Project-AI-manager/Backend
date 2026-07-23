@@ -141,7 +141,7 @@ class VectorMemoryRetriever(MemoryRetriever):
         limit: int = 4,
     ) -> list[MemorySnippet]:
         try:
-            [query_vector] = await self.embedder.embed([query])
+            [query_vector] = await self.embedder.embed_queries([query])
             hits = await self.vector_store.search(
                 tenant_id=tenant_id,
                 vector=query_vector,

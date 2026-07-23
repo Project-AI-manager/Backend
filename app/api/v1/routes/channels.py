@@ -11,6 +11,11 @@ from app.schemas.channels import (
     ChannelConnectRequest,
     ChannelResponse,
     ChannelWebhookResponse,
+    TelegramAccountAuthResponse,
+    TelegramAccountConfirmRequest,
+    TelegramAccountPasswordRequest,
+    TelegramAccountStartRequest,
+    TelegramAccountStartResponse,
 )
 from app.services.channels.telegram import (
     connect_channel as connect_channel_service,
@@ -19,8 +24,44 @@ from app.services.channels.telegram import (
     list_channels as list_channels_service,
 )
 from app.services.channels.telegram import process_telegram_webhook
+from app.services.channels.telegram_mtproto import (
+    confirm_account_code,
+    confirm_account_password,
+    start_account_connection,
+)
 
 router = APIRouter()
+
+
+@router.post("/telegram/account/start", response_model=TelegramAccountStartResponse)
+async def start_telegram_account(
+    body: TelegramAccountStartRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> TelegramAccountStartResponse:
+    return await start_account_connection(session, tenant_id_from_user(user), body.phone)
+
+
+@router.post("/telegram/account/confirm", response_model=TelegramAccountAuthResponse)
+async def confirm_telegram_account(
+    body: TelegramAccountConfirmRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> TelegramAccountAuthResponse:
+    return await confirm_account_code(
+        session, tenant_id_from_user(user), body.channel_id, body.code
+    )
+
+
+@router.post("/telegram/account/password", response_model=TelegramAccountAuthResponse)
+async def confirm_telegram_password(
+    body: TelegramAccountPasswordRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> TelegramAccountAuthResponse:
+    return await confirm_account_password(
+        session, tenant_id_from_user(user), body.channel_id, body.password
+    )
 
 
 @router.get("", response_model=list[ChannelResponse])

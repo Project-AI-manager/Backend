@@ -36,8 +36,9 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "local"
     EMBEDDING_BASE_URL: str = ""
     EMBEDDING_API_KEY: str = ""
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIMENSION: int = 1024
+    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_DIMENSION: int = 384
+    EMBEDDING_CACHE_DIR: str = ".model-cache"
     EMBEDDING_TIMEOUT_SEC: float = 30.0
     EMBEDDING_PROBE_TIMEOUT_SEC: float = 10.0
     OPENAI_COMPATIBLE_BASE_URL: str = ""
@@ -50,6 +51,8 @@ class Settings(BaseSettings):
     TELEGRAM_DELIVERY_ENABLED: bool = False
     TELEGRAM_DELIVERY_TIMEOUT_SEC: float = 8.0
     TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK: bool = True
+    TELEGRAM_API_ID: int = 0
+    TELEGRAM_API_HASH: str = ""
 
     EMAIL_FROM: str = "Автопилот <no-reply@localhost>"
     EMAIL_DEV_MODE: bool = True

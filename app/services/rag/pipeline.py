@@ -12,7 +12,7 @@ async def answer(tenant_id: str, question: str, history: list[str] | None = None
     llm = get_llm()
 
     # 1. Эмбеддинг запроса
-    [query_vec] = await embedder.embed([question])
+    [query_vec] = await embedder.embed_queries([question])
     # 2. TODO: поиск top-k в Qdrant с фильтром tenant_id
     chunks: list[str] = []
     retrieval_score = 0.0

@@ -18,6 +18,7 @@ from app.schemas.conversations import (
     ConversationThreadResponse,
 )
 from app.services.channels.telegram import send_telegram_message
+from app.services.channels.telegram_mtproto import send_mtproto_message
 
 
 async def list_conversations(
@@ -235,7 +236,12 @@ async def _deliver_outbound_message(
     if not chat_id:
         return False
 
-    delivered = await send_telegram_message(channel, chat_id, message.text)
+    transport = str((channel.settings or {}).get("transport") or "")
+    delivered = (
+        await send_mtproto_message(channel, chat_id, message.text)
+        if transport == "mtproto"
+        else await send_telegram_message(channel, chat_id, message.text)
+    )
     message.external_message_id = f"manager:{message.id}"
     return delivered
 

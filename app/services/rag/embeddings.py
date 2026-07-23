@@ -7,6 +7,7 @@ import json
 import math
 import re
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -31,6 +32,12 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+    async def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed(texts)
+
+    async def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed(texts)
 
 
 class LocalEmbedding(EmbeddingProvider):
@@ -145,6 +152,43 @@ class OpenAICompatibleEmbedding(EmbeddingProvider):
         return vectors
 
 
+class LocalMLEmbedding(EmbeddingProvider):
+    """CPU-friendly multilingual ONNX embeddings downloaded once and cached locally."""
+
+    provider_name = "local-ml"
+
+    def __init__(self, *, model: str, dimension: int, cache_dir: str) -> None:
+        if not model.strip():
+            raise EmbeddingProviderConfigurationError("EMBEDDING_MODEL is required")
+        if dimension <= 0:
+            raise EmbeddingProviderConfigurationError("EMBEDDING_DIMENSION must be positive")
+        self.model = model.strip()
+        self.dimension = dimension
+        self.cache_dir = cache_dir.strip() or ".model-cache"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed_passages(texts)
+
+    async def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, kind="query")
+
+    async def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, kind="passage")
+
+    def _embed(self, texts: list[str], *, kind: str) -> list[list[float]]:
+        if not texts:
+            return []
+        model = _load_fastembed_model(self.model, self.cache_dir)
+        prepared = [f"{kind}: {text}" for text in texts] if _uses_e5_prefix(self.model) else texts
+        vectors = [[float(value) for value in vector] for vector in model.embed(prepared)]
+        for vector in vectors:
+            if len(vector) != self.dimension:
+                raise EmbeddingProviderRequestError(
+                    "Embedding dimension mismatch: "
+                    f"model returned {len(vector)}, configured {self.dimension}"
+                )
+        return vectors
+
 def get_embedder(
     model: str | None = None,
     *,
@@ -155,6 +199,12 @@ def get_embedder(
     configured_model = (model or settings.EMBEDDING_MODEL).strip()
     if configured_provider in {"local", "hashing"}:
         return LocalEmbedding(dimension=settings.EMBEDDING_DIMENSION)
+    if configured_provider in {"local-ml", "fastembed", "onnx"}:
+        return LocalMLEmbedding(
+            model=configured_model,
+            dimension=settings.EMBEDDING_DIMENSION,
+            cache_dir=settings.EMBEDDING_CACHE_DIR,
+        )
     if configured_provider in {"openai", "openai-compatible", "unirouter"}:
         return OpenAICompatibleEmbedding(
             base_url=settings.EMBEDDING_BASE_URL,
@@ -167,6 +217,21 @@ def get_embedder(
     raise EmbeddingProviderConfigurationError(
         f"Unsupported embedding provider '{settings.EMBEDDING_PROVIDER}'"
     )
+
+
+@lru_cache(maxsize=2)
+def _load_fastembed_model(model: str, cache_dir: str) -> Any:
+    try:
+        from fastembed import TextEmbedding
+    except ImportError as exc:
+        raise EmbeddingProviderConfigurationError(
+            "fastembed is required for EMBEDDING_PROVIDER=local-ml"
+        ) from exc
+    return TextEmbedding(model_name=model, cache_dir=cache_dir, threads=4)
+
+
+def _uses_e5_prefix(model: str) -> bool:
+    return "e5" in model.lower()
 
 
 def _hashing_vector(text: str, *, dimension: int) -> list[float]:

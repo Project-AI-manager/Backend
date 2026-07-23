@@ -22,6 +22,7 @@ from app.services.rag.embeddings import (
     VECTOR_DIM,
     EmbeddingProviderRequestError,
     LocalEmbedding,
+    LocalMLEmbedding,
     OpenAICompatibleEmbedding,
 )
 from app.services.rag.vector_store import QdrantVectorStore, VectorPoint, VectorSearchHit
@@ -104,6 +105,36 @@ async def test_local_embedding_is_deterministic_non_zero_and_normalized() -> Non
     assert any(value != 0 for value in first)
     assert empty == [0.0] * VECTOR_DIM
     assert math.isclose(math.sqrt(sum(value * value for value in first)), 1.0, abs_tol=0.0001)
+
+
+@pytest.mark.asyncio
+async def test_local_ml_embedding_adds_e5_query_and_passage_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    class FakeModel:
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            captured.append(texts)
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(
+        "app.services.rag.embeddings._load_fastembed_model",
+        lambda model, cache_dir: FakeModel(),
+    )
+    embedder = LocalMLEmbedding(
+        model="intfloat/multilingual-e5-large",
+        dimension=3,
+        cache_dir="cache",
+    )
+
+    await embedder.embed_queries(["цена доставки"])
+    await embedder.embed_passages(["Доставка стоит 500 рублей"])
+
+    assert captured == [
+        ["query: цена доставки"],
+        ["passage: Доставка стоит 500 рублей"],
+    ]
 
 
 @pytest.mark.asyncio

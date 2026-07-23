@@ -312,7 +312,7 @@ async def _index_chunks(
     try:
         ai_config = await session.get(TenantAIConfig, document.tenant_id)
         embedder = get_embedder(ai_config.embedding_model if ai_config else None)
-        vectors = await embedder.embed(
+        vectors = await embedder.embed_passages(
             [f"{document.title}\n\n{chunk.text}\n\n{_tags_text(chunk.tags)}" for chunk in chunks]
         )
         await vector_store.upsert_chunks(
@@ -379,7 +379,7 @@ async def reindex_kb_document(session: AsyncSession, document_id: uuid.UUID) -> 
             )
             if chunks:
                 embedder = get_embedder()
-                vectors = await embedder.embed(
+                vectors = await embedder.embed_passages(
                     [
                         f"{document.title}\n\n{chunk.text}\n\n{_tags_text(chunk.tags)}"
                         for chunk in chunks

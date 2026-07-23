@@ -297,6 +297,9 @@ def test_create_knowledge_document_uses_tenant_embedding_model(
         async def embed(self, texts: list[str]) -> list[list[float]]:
             return [[1.0, 0.0] for _ in texts]
 
+        async def embed_passages(self, texts: list[str]) -> list[list[float]]:
+            return await self.embed(texts)
+
     def fake_get_embedder(model: str | None = None) -> FakeEmbedder:
         configured_models.append(model)
         return FakeEmbedder()
