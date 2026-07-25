@@ -1,14 +1,17 @@
 """Auth API tests: register, login, refresh and current user profile."""
+import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.schema import Table
 
+from app.core.config import settings
 from app.db.session import get_session
 from app.main import app
 from app.models.tenant import Tenant, TenantAIConfig
@@ -83,6 +86,22 @@ def test_register_returns_tokens_and_me_profile(client: TestClient) -> None:
     assert data["full_name"] == "Тимур"
     assert data["role"] == "owner"
     assert data["tenant_id"]
+
+
+def test_register_uses_runtime_ai_defaults(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    register(client)
+
+    async def load_config() -> TenantAIConfig:
+        async with session_factory() as session:
+            result = await session.execute(select(TenantAIConfig))
+            return result.scalar_one()
+
+    config = asyncio.run(load_config())
+    assert config.llm_provider == settings.LLM_PROVIDER
+    assert config.embedding_model == settings.EMBEDDING_MODEL
 
 
 def test_login_returns_new_token_pair(client: TestClient) -> None:

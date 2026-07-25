@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.schema import Table
 
+from app.core.config import settings
 from app.core.security import create_token
 from app.db.session import get_session
 from app.main import app
@@ -141,8 +142,8 @@ def test_get_ai_settings_creates_default_config(
     data = response.json()
     assert data["auto_reply_enabled"] is False
     assert data["confidence_threshold"] == 80
-    assert data["llm_provider"] == "mock"
-    assert data["embedding_model"] == "multilingual-e5-large"
+    assert data["llm_provider"] == settings.LLM_PROVIDER
+    assert data["embedding_model"] == settings.EMBEDDING_MODEL
     assert "unirouter" in data["available_providers"]
 
 

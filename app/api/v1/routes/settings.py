@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AdminUser, CurrentUser, SessionDep, tenant_id_from_user
+from app.core.config import settings
 from app.models.ops import Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant, TenantAIConfig
 from app.schemas.settings import (
@@ -20,9 +21,6 @@ from app.schemas.settings import (
 )
 
 router = APIRouter()
-
-DEFAULT_EMBEDDING_MODEL = "multilingual-e5-large"
-
 
 @router.get("/ai", response_model=AISettingsResponse)
 async def get_ai_settings(user: CurrentUser, session: SessionDep) -> AISettingsResponse:
@@ -137,8 +135,8 @@ async def _get_or_create_ai_config(session: AsyncSession, tenant_id: UUID) -> Te
             tenant_id=tenant.id,
             auto_reply_enabled=False,
             confidence_threshold=80,
-            llm_provider="mock",
-            embedding_model=DEFAULT_EMBEDDING_MODEL,
+            llm_provider=settings.LLM_PROVIDER,
+            embedding_model=settings.EMBEDDING_MODEL,
             system_prompt="",
         )
         session.add(config)
