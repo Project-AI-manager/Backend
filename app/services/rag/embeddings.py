@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.logging import log
 
 VECTOR_DIM = 1024  # Stable local-hashing dimension kept for backwards compatibility.
 TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
@@ -197,6 +198,17 @@ def get_embedder(
     ) -> EmbeddingProvider:
     configured_provider = settings.EMBEDDING_PROVIDER.strip().lower()
     configured_model = (model or settings.EMBEDDING_MODEL).strip()
+    # Контракт эмбеддингов один на деплой: коллекция Qdrant создана под
+    # settings.EMBEDDING_MODEL/EMBEDDING_DIMENSION. Устаревшее имя модели из
+    # tenant_ai_config не должно тихо ронять ретрив в SQL-фолбэк — используем
+    # серверную модель и оставляем предупреждение в логе.
+    if configured_model != settings.EMBEDDING_MODEL.strip():
+        log.warning(
+            "tenant_embedding_model_mismatch",
+            requested_model=configured_model,
+            runtime_model=settings.EMBEDDING_MODEL,
+        )
+        configured_model = settings.EMBEDDING_MODEL.strip()
     if configured_provider in {"local", "hashing"}:
         return LocalEmbedding(dimension=settings.EMBEDDING_DIMENSION)
     if configured_provider in {"local-ml", "fastembed", "onnx"}:

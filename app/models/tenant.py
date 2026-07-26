@@ -4,6 +4,7 @@ import uuid
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.config import settings
 from app.db.base import Base, TimestampMixin, UUIDMixin
 
 
@@ -20,6 +21,8 @@ class TenantAIConfig(Base, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), primary_key=True)
     auto_reply_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence_threshold: Mapped[int] = mapped_column(Integer, default=80)  # 0..100
-    llm_provider: Mapped[str] = mapped_column(String(32), default="mock")
-    embedding_model: Mapped[str] = mapped_column(String(64), default="multilingual-e5-large")
+    llm_provider: Mapped[str] = mapped_column(String(32), default=lambda: settings.LLM_PROVIDER)
+    embedding_model: Mapped[str] = mapped_column(
+        String(64), default=lambda: settings.EMBEDDING_MODEL
+    )
     system_prompt: Mapped[str] = mapped_column(Text, default="")

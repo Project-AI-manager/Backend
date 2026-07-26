@@ -9,6 +9,7 @@ from jwt import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import (
     create_token,
     decode_token,
@@ -77,8 +78,8 @@ async def register_user(session: AsyncSession, body: RegisterRequest) -> TokenPa
             tenant_id=tenant.id,
             auto_reply_enabled=False,
             confidence_threshold=80,
-            llm_provider="mock",
-            embedding_model="multilingual-e5-large",
+            llm_provider=settings.LLM_PROVIDER,
+            embedding_model=settings.EMBEDDING_MODEL,
             system_prompt="",
         )
     )

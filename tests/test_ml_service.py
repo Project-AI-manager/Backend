@@ -177,13 +177,17 @@ async def test_ml_service_escalates_when_provider_returns_empty_answer() -> None
     assert result.decision == "escalate"
 
 
-def test_unknown_and_external_providers_fail_before_generation() -> None:
+def test_unknown_and_external_providers_fail_before_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(LLMProviderConfigurationError):
         get_llm("unknown")
     with pytest.raises(LLMProviderConfigurationError):
         get_llm("yandexgpt")
     with pytest.raises(LLMProviderConfigurationError):
         get_llm("gigachat")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", "")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "")
     with pytest.raises(LLMProviderConfigurationError):
         get_llm("openai-compatible")
     assert isinstance(get_llm("mock"), MockLLM)
