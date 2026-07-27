@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -332,6 +333,33 @@ def test_analytics_overview_returns_tenant_kpis(
         {"status": "escalated", "count": 1},
         {"status": "open", "count": 1},
     ]
+
+
+def test_analytics_counts_answered_conversation_as_open(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def mark_open_conversation_answered() -> None:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(Conversation).where(
+                    Conversation.tenant_id == TENANT_ID,
+                    Conversation.status == "open",
+                )
+            )
+            conversation = result.scalar_one()
+            conversation.status = "answered"
+            await session.commit()
+
+    asyncio.run(mark_open_conversation_answered())
+    response = client.get("/api/v1/analytics/overview", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["dialogs_open"] == 1
+    assert {"status": "answered", "count": 1} in data["status_breakdown"]
 
 
 def test_analytics_overview_returns_zeroes_for_empty_tenant(

@@ -166,12 +166,34 @@ def test_manager_reply_creates_message_and_kb_candidate(
     data = response.json()
     assert data["delivered"] is False
     assert data["message"]["sender_type"] == "manager"
+    assert data["message"]["sender_user_id"] == str(USER_ID)
     assert data["message"]["status"] == "pending"
     assert data["message"]["ai_meta"]["delivery"] == "delivery-disabled"
-    assert data["conversation"]["status"] == "open"
+    assert data["conversation"]["status"] == "answered"
     assert data["conversation"]["unread_count"] == 0
     assert len(data["conversation"]["messages"]) == 2
+    assert data["conversation"]["messages"][0]["sender_user_id"] is None
+    assert data["conversation"]["messages"][1]["sender_user_id"] == str(USER_ID)
     assert asyncio.run(candidate_count(session_factory)) == 1
+
+
+def test_conversation_responses_include_channel_type(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+
+    list_response = client.get("/api/v1/conversations", headers=auth_headers())
+    thread_response = client.get(
+        f"/api/v1/conversations/{CONVERSATION_ID}",
+        headers=auth_headers(),
+    )
+
+    assert list_response.status_code == 200, list_response.text
+    assert list_response.json()[0]["channel_type"] == "telegram"
+    assert thread_response.status_code == 200, thread_response.text
+    assert thread_response.json()["channel_type"] == "telegram"
+    assert thread_response.json()["messages"][0]["sender_user_id"] is None
 
 
 def test_escalate_conversation_assigns_current_user(
@@ -190,6 +212,39 @@ def test_escalate_conversation_assigns_current_user(
     assert data["conversation"]["status"] == "escalated"
     assert data["message"] is None
     assert data["delivered"] is None
+
+
+def test_close_conversation_marks_it_closed(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/close",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["conversation"]["status"] == "closed"
+    assert data["conversation"]["unread_count"] == 0
+    assert data["message"] is None
+    assert data["delivered"] is None
+
+
+def test_close_requires_conversation_in_current_tenant(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid.uuid4()}/close",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 404
 
 
 def test_reply_requires_conversation_in_current_tenant(

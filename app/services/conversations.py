@@ -27,16 +27,17 @@ async def list_conversations(
     status_filter: str | None = None,
 ) -> list[ConversationResponse]:
     query = (
-        select(Conversation, Customer.display_name)
+        select(Conversation, Customer.display_name, Channel.type)
         .join(Customer, Customer.id == Conversation.customer_id)
+        .join(Channel, Channel.id == Conversation.channel_id)
         .where(Conversation.tenant_id == tenant_id)
     )
     if status_filter:
         query = query.where(Conversation.status == status_filter)
     result = await session.execute(query.order_by(desc(Conversation.last_message_at)))
     return [
-        _conversation_response(conversation, customer_name)
-        for conversation, customer_name in result.all()
+        _conversation_response(conversation, customer_name, channel_type)
+        for conversation, customer_name, channel_type in result.all()
     ]
 
 
@@ -46,21 +47,22 @@ async def get_conversation_thread(
     conversation_id: UUID,
 ) -> ConversationThreadResponse:
     result = await session.execute(
-        select(Conversation, Customer.display_name)
+        select(Conversation, Customer.display_name, Channel.type)
         .join(Customer, Customer.id == Conversation.customer_id)
+        .join(Channel, Channel.id == Conversation.channel_id)
         .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
     )
     row = result.first()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
 
-    conversation, customer_name = row
+    conversation, customer_name, channel_type = row
     messages_result = await session.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id, Message.tenant_id == tenant_id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
     )
-    base = _conversation_response(conversation, customer_name)
+    base = _conversation_response(conversation, customer_name, channel_type)
     return ConversationThreadResponse(
         **base.model_dump(),
         messages=[_message_response(message) for message in messages_result.scalars().all()],
@@ -86,6 +88,7 @@ async def reply_to_conversation(
     latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
     chat_id = _message_chat_id(latest_inbound)
 
+    replied_at = datetime.now(UTC)
     message = Message(
         tenant_id=tenant_id,
         conversation_id=conversation.id,
@@ -97,6 +100,7 @@ async def reply_to_conversation(
         external_message_id=None,
         status="pending",
         confidence=None,
+        created_at=replied_at,
         ai_meta={
             "source": "manager",
             **({"chat_id": chat_id} if chat_id else {}),
@@ -112,8 +116,8 @@ async def reply_to_conversation(
         "delivery": "channel-sent" if delivered else "delivery-disabled",
     }
 
-    conversation.status = "open"
-    conversation.last_message_at = datetime.now(UTC)
+    conversation.status = "answered"
+    conversation.last_message_at = replied_at
     conversation.last_message_preview = text[:512]
     conversation.unread_count = 0
 
@@ -160,13 +164,33 @@ async def escalate_conversation(
     return ConversationActionResponse(conversation=thread, message=None, delivered=None)
 
 
+async def close_conversation(
+    session: AsyncSession,
+    tenant_id: UUID,
+    conversation_id: UUID,
+) -> ConversationActionResponse:
+    conversation, _customer_name, _channel = await _conversation_with_channel(
+        session,
+        tenant_id,
+        conversation_id,
+    )
+    conversation.status = "closed"
+    conversation.unread_count = 0
+
+    await session.commit()
+    thread = await get_conversation_thread(session, tenant_id, conversation.id)
+    return ConversationActionResponse(conversation=thread, message=None, delivered=None)
+
+
 def _conversation_response(
     conversation: Conversation,
     customer_name: str,
+    channel_type: str,
 ) -> ConversationResponse:
     return ConversationResponse(
         id=conversation.id,
         channel_id=conversation.channel_id,
+        channel_type=channel_type,
         customer_id=conversation.customer_id,
         customer_name=customer_name,
         status=conversation.status,
@@ -181,6 +205,7 @@ def _message_response(message: Message) -> ConversationMessageResponse:
         id=message.id,
         direction=message.direction,
         sender_type=message.sender_type,
+        sender_user_id=message.sender_user_id,
         text=message.text,
         status=message.status,
         confidence=message.confidence,

@@ -12,6 +12,7 @@ from app.schemas.conversations import (
     ConversationThreadResponse,
 )
 from app.services.conversations import (
+    close_conversation,
     escalate_conversation,
     get_conversation_thread,
     list_conversations,
@@ -66,4 +67,17 @@ async def escalate(
         tenant_id_from_user(user),
         conversation_id,
         uuid.UUID(str(user["sub"])),
+    )
+
+
+@router.post("/{conversation_id}/close", response_model=ConversationActionResponse)
+async def close(
+    conversation_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ConversationActionResponse:
+    return await close_conversation(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
     )

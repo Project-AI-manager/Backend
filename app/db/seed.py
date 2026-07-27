@@ -52,7 +52,6 @@ DEMO_IDS = {
     "message_3": uuid.UUID("11111111-1111-4111-8111-111111111062"),
     "message_4": uuid.UUID("11111111-1111-4111-8111-111111111063"),
     "message_5": uuid.UUID("11111111-1111-4111-8111-111111111064"),
-    "message_6": uuid.UUID("11111111-1111-4111-8111-111111111065"),
     "doc_faq": uuid.UUID("11111111-1111-4111-8111-111111111070"),
     "doc_script": uuid.UUID("11111111-1111-4111-8111-111111111071"),
     "chunk_faq_1": uuid.UUID("11111111-1111-4111-8111-111111111080"),
@@ -61,6 +60,10 @@ DEMO_IDS = {
     "candidate_1": uuid.UUID("11111111-1111-4111-8111-111111111090"),
     "escalation_1": uuid.UUID("11111111-1111-4111-8111-111111111091"),
 }
+
+LEGACY_DEMO_MESSAGE_IDS = (
+    uuid.UUID("11111111-1111-4111-8111-111111111065"),
+)
 
 DEMO_CREDENTIALS = {
     "owner_email": DEMO_OWNER_EMAIL,
@@ -340,7 +343,7 @@ async def _upsert_conversations(
             "open",
             manager.id,
             now - timedelta(minutes=8),
-            "Хочу понять, сколько времени займёт подключение Telegram.",
+            "Да, мы подключим тестовый Telegram-аккаунт и загрузим базу знаний.",
             1,
         ),
         (
@@ -358,7 +361,7 @@ async def _upsert_conversations(
             "escalated",
             owner.id,
             now - timedelta(hours=3),
-            "Нужно обсудить нестандартную интеграцию с CRM.",
+            "Нам нужна интеграция с CRM и отдельные правила для VIP-клиентов.",
             2,
         ),
     ]
@@ -449,17 +452,6 @@ async def _upsert_messages(
             "received",
             None,
         ),
-        (
-            DEMO_IDS["message_6"],
-            conversations[2],
-            "outbound",
-            "manager",
-            manager.id,
-            "Передам запрос владельцу проекта, тут лучше обсудить сценарий отдельно.",
-            "tg-msg-1003-2",
-            "sent",
-            None,
-        ),
     ]
 
     messages: dict[str, Message] = {}
@@ -497,6 +489,13 @@ async def _upsert_messages(
         messages[f"message_{index}"] = message
 
     return messages
+
+
+async def _remove_legacy_demo_messages(session: AsyncSession) -> None:
+    for message_id in LEGACY_DEMO_MESSAGE_IDS:
+        message = await session.get(Message, message_id)
+        if message is not None:
+            await session.delete(message)
 
 
 async def _upsert_knowledge_base(
@@ -636,6 +635,7 @@ async def seed_demo_data(session: AsyncSession) -> SeedStats:
         stats,
     )
     messages = await _upsert_messages(session, tenant, manager, conversations, stats)
+    await _remove_legacy_demo_messages(session)
     await _upsert_knowledge_base(session, tenant, conversations, stats)
     await _upsert_escalation(session, tenant, conversations, messages, stats)
 

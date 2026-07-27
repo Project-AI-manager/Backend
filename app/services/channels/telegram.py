@@ -436,7 +436,7 @@ async def _get_or_create_conversation(
             Conversation.tenant_id == channel.tenant_id,
             Conversation.channel_id == channel.id,
             Conversation.customer_id == customer.id,
-            Conversation.status.in_(("open", "auto", "escalated")),
+            Conversation.status.in_(("open", "auto", "answered", "escalated")),
         )
     )
     conversation = result.scalars().first()

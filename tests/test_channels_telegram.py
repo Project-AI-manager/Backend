@@ -277,6 +277,40 @@ def test_telegram_webhook_is_idempotent(
     assert asyncio.run(count_rows(session_factory, WebhookEvent)) == 1
 
 
+def test_telegram_inbound_reuses_answered_conversation(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    first = client.post("/api/v1/channels/webhook/telegram", json=telegram_payload())
+
+    async def mark_answered() -> None:
+        async with session_factory() as session:
+            conversation = await session.get(
+                Conversation,
+                uuid.UUID(first.json()["conversation_id"]),
+            )
+            assert conversation is not None
+            conversation.status = "answered"
+            await session.commit()
+
+    asyncio.run(mark_answered())
+    second = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1002, text="Рђ РµСЃР»Рё РµСЃС‚СЊ РµС‰С‘ РІРѕРїСЂРѕСЃ?"),
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert second.json()["conversation_id"] == first.json()["conversation_id"]
+    assert asyncio.run(count_rows(session_factory, Conversation)) == 1
+
+
 def test_completed_inbound_worker_is_idempotent(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

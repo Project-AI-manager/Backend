@@ -14,6 +14,7 @@ class ConversationMessageResponse(BaseModel):
     id: UUID
     direction: str
     sender_type: str
+    sender_user_id: UUID | None
     text: str
     status: str
     confidence: float | None
@@ -24,6 +25,7 @@ class ConversationMessageResponse(BaseModel):
 class ConversationResponse(BaseModel):
     id: UUID
     channel_id: UUID
+    channel_type: str
     customer_id: UUID
     customer_name: str
     status: str

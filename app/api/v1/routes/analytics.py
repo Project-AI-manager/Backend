@@ -42,7 +42,7 @@ async def overview(user: CurrentUser, session: SessionDep) -> AnalyticsOverviewR
 
     return AnalyticsOverviewResponse(
         dialogs_total=dialogs_total,
-        dialogs_open=status_counts.get("open", 0),
+        dialogs_open=status_counts.get("open", 0) + status_counts.get("answered", 0),
         dialogs_auto=status_counts.get("auto", 0),
         dialogs_escalated=status_counts.get("escalated", 0),
         dialogs_closed=status_counts.get("closed", 0),
