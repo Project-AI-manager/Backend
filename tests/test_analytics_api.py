@@ -362,6 +362,131 @@ def test_analytics_counts_answered_conversation_as_open(
     assert {"status": "answered", "count": 1} in data["status_breakdown"]
 
 
+def test_analytics_filters_by_inclusive_utc_dates_and_fills_daily_zeroes(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def arrange_dates() -> None:
+        async with session_factory() as session:
+            conversations = list(
+                (
+                    await session.execute(
+                        select(Conversation).where(Conversation.tenant_id == TENANT_ID)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_status = {conversation.status: conversation for conversation in conversations}
+            by_status["open"].created_at = datetime(2026, 7, 19, 23, 59, tzinfo=UTC)
+            by_status["auto"].created_at = datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
+            by_status["escalated"].created_at = datetime(2026, 7, 22, 0, 0, tzinfo=UTC)
+
+            messages = list(
+                (await session.execute(select(Message).where(Message.tenant_id == TENANT_ID)))
+                .scalars()
+                .all()
+            )
+            for message in messages:
+                message.created_at = (
+                    datetime(2026, 7, 20, 8, 0, tzinfo=UTC)
+                    if message.conversation_id == by_status["auto"].id
+                    else datetime(2026, 7, 22, 8, 0, tzinfo=UTC)
+                )
+            await session.commit()
+
+    asyncio.run(arrange_dates())
+
+    response = client.get(
+        "/api/v1/analytics/overview?from=2026-07-20&to=2026-07-23",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["date_from"] == "2026-07-20"
+    assert data["date_to"] == "2026-07-23"
+    assert data["dialogs_total"] == 2
+    assert data["daily_series"] == [
+        {"date": "2026-07-20", "dialogs": 1},
+        {"date": "2026-07-21", "dialogs": 0},
+        {"date": "2026-07-22", "dialogs": 1},
+        {"date": "2026-07-23", "dialogs": 0},
+    ]
+
+
+def test_analytics_auto_reply_rate_cannot_include_another_tenants_conversation(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def add_cross_tenant_message() -> None:
+        async with session_factory() as session:
+            tenant_conversation = (
+                await session.execute(
+                    select(Conversation).where(
+                        Conversation.tenant_id == TENANT_ID,
+                        Conversation.status == "auto",
+                    )
+                )
+            ).scalar_one()
+            other_conversation = (
+                await session.execute(
+                    select(Conversation).where(Conversation.tenant_id == OTHER_TENANT_ID)
+                )
+            ).scalar_one()
+            now = datetime.now(UTC)
+            for conversation in (
+                tenant_conversation,
+                other_conversation,
+            ):
+                conversation.created_at = now
+            session.add(
+                Message(
+                    tenant_id=TENANT_ID,
+                    conversation_id=other_conversation.id,
+                    direction="outbound",
+                    sender_type="ai",
+                    text="Must not affect tenant analytics",
+                    attachments={},
+                    status="sent",
+                    confidence=1.0,
+                    ai_meta={},
+                    created_at=now,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(add_cross_tenant_message())
+
+    today = datetime.now(UTC).date().isoformat()
+    response = client.get(
+        f"/api/v1/analytics/overview?from={today}&to={today}",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["auto_reply_rate"] == 0.3333
+
+
+def test_analytics_rejects_inverted_date_range(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    response = client.get(
+        "/api/v1/analytics/overview?from=2026-07-23&to=2026-07-20",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 422
+
+
 def test_analytics_overview_returns_zeroes_for_empty_tenant(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

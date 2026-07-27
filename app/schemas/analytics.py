@@ -1,5 +1,7 @@
 """Pydantic schemas for dashboard analytics."""
 
+from datetime import date
+
 from pydantic import BaseModel
 
 
@@ -8,7 +10,14 @@ class AnalyticsStatusBreakdownItem(BaseModel):
     count: int
 
 
+class AnalyticsDailySeriesItem(BaseModel):
+    date: date
+    dialogs: int
+
+
 class AnalyticsOverviewResponse(BaseModel):
+    date_from: date
+    date_to: date
     dialogs_total: int
     dialogs_open: int
     dialogs_auto: int
@@ -27,3 +36,4 @@ class AnalyticsOverviewResponse(BaseModel):
     knowledge_chunks_count: int
     pending_candidates_count: int
     status_breakdown: list[AnalyticsStatusBreakdownItem]
+    daily_series: list[AnalyticsDailySeriesItem]
