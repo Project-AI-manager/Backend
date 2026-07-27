@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-KnowledgeSourceType = Literal["manual", "txt", "md", "url"]
+KnowledgeSourceType = Literal["manual", "txt", "md", "pdf", "docx", "xlsx", "url"]
 
 
 class KnowledgeDocumentCreate(BaseModel):

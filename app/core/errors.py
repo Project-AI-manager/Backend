@@ -15,6 +15,8 @@ STATUS_CODES = {
     403: "forbidden",
     404: "not_found",
     409: "conflict",
+    413: "payload_too_large",
+    415: "unsupported_media_type",
     422: "validation_error",
     500: "internal_server_error",
     502: "upstream_service_error",

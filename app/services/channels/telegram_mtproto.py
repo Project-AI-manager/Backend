@@ -243,7 +243,16 @@ async def _tenant_telegram_channel(session: AsyncSession, tenant_id: UUID) -> Ch
     result = await session.execute(
         select(Channel).where(Channel.tenant_id == tenant_id, Channel.type == "telegram")
     )
-    return result.scalars().first()
+    channels = list(result.scalars())
+    return next(
+        (
+            channel
+            for channel in channels
+            if channel.settings.get("transport") == "mtproto"
+            or channel.settings.get("sync_status") == "demo"
+        ),
+        None,
+    )
 
 
 async def _owned_channel(session: AsyncSession, tenant_id: UUID, channel_id: UUID) -> Channel:

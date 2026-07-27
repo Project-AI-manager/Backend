@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -283,6 +288,215 @@ def test_create_knowledge_document_survives_vector_index_failure(
 
     assert created.status_code == 200, created.text
     assert created.json()["status"] == "ready"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "payload", "source_type", "expected_text"),
+    [
+        (
+            "support.txt",
+            "text/plain",
+            "Доставка занимает два дня.".encode(),
+            "txt",
+            "Доставка занимает два дня.",
+        ),
+        (
+            "support.md",
+            "text/markdown",
+            "# Оплата\n\nКартой или переводом.".encode(),
+            "md",
+            "Картой или переводом.",
+        ),
+    ],
+)
+def test_upload_text_knowledge_file(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    payload: bytes,
+    source_type: str,
+    expected_text: str,
+) -> None:
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: None)
+    asyncio.run(seed_tenant(session_factory))
+
+    created = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": (filename, payload, content_type)},
+        data={"tags": '{"source":"upload"}'},
+    )
+
+    assert created.status_code == 200, created.text
+    data = created.json()
+    assert data["title"] == filename.rsplit(".", 1)[0]
+    assert data["source_type"] == source_type
+    detail = client.get(
+        f"/api/v1/knowledge/documents/{data['id']}",
+        headers=auth_headers(),
+    )
+    assert detail.status_code == 200
+    assert expected_text in detail.json()["chunks"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "payload", "source_type", "expected_text"),
+    [
+        pytest.param(
+            "guide.pdf",
+            "application/pdf",
+            None,
+            "pdf",
+            "Telegram setup guide",
+            id="generated-pdf",
+        ),
+        pytest.param(
+            "guide.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            None,
+            "docx",
+            "Telegram setup guide",
+            id="generated-docx",
+        ),
+        pytest.param(
+            "guide.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            None,
+            "xlsx",
+            "Telegram setup guide",
+            id="generated-xlsx",
+        ),
+    ],
+)
+def test_upload_structured_knowledge_file(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    payload: bytes | None,
+    source_type: str,
+    expected_text: str,
+) -> None:
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: None)
+    asyncio.run(seed_tenant(session_factory))
+    builders = {
+        "pdf": _pdf_bytes,
+        "docx": _docx_bytes,
+        "xlsx": _xlsx_bytes,
+    }
+    payload = payload or builders[source_type](expected_text)
+
+    created = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": (filename, payload, content_type)},
+        data={"title": "Uploaded guide"},
+    )
+
+    assert created.status_code == 200, created.text
+    data = created.json()
+    assert data["source_type"] == source_type
+    assert data["title"] == "Uploaded guide"
+    detail = client.get(
+        f"/api/v1/knowledge/documents/{data['id']}",
+        headers=auth_headers(),
+    )
+    assert expected_text in detail.json()["chunks"][0]["text"]
+
+
+def test_upload_rejects_unsupported_and_oversized_files(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+
+    unsupported = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": ("image.png", b"not-an-image", "image/png")},
+    )
+    oversized = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": ("huge.txt", b"x" * (10 * 1024 * 1024 + 1), "text/plain")},
+    )
+
+    assert unsupported.status_code == 415
+    assert unsupported.json()["detail"]["code"] == "unsupported_media_type"
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"]["code"] == "payload_too_large"
+
+
+def test_upload_rejects_invalid_tags_and_image_only_pdf(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+
+    bad_tags = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": ("guide.txt", b"Some knowledge", "text/plain")},
+        data={"tags": "[]"},
+    )
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    stream = io.BytesIO()
+    writer.write(stream)
+    image_only = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": ("scan.pdf", stream.getvalue(), "application/pdf")},
+    )
+
+    assert bad_tags.status_code == 422
+    assert image_only.status_code == 422
+    assert "OCR is not supported" in image_only.json()["detail"]["message"]
+
+
+def _pdf_bytes(text: str) -> bytes:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    content = DecodedStreamObject()
+    escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    content.set_data(f"BT /F1 12 Tf 30 250 Td ({escaped}) Tj ET".encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(content)
+    stream = io.BytesIO()
+    writer.write(stream)
+    return stream.getvalue()
+
+
+def _docx_bytes(text: str) -> bytes:
+    document = Document()
+    document.add_paragraph(text)
+    stream = io.BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def _xlsx_bytes(text: str) -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Knowledge"
+    worksheet.append(["Question", "Answer"])
+    worksheet.append(["Telegram", text])
+    stream = io.BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    return stream.getvalue()
 
 
 def test_create_knowledge_document_uses_tenant_embedding_model(

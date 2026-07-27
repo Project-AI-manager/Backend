@@ -174,6 +174,7 @@ def test_qdrant_health_is_disabled_by_default(
 def test_integration_diagnostics_require_authentication(client: TestClient) -> None:
     assert client.get("/api/v1/integrations/health").status_code == 401
     assert client.post("/api/v1/integrations/llm/probe").status_code == 401
+    assert client.post("/api/v1/integrations/embeddings/probe").status_code == 401
 
 
 def test_embedding_probe_calls_openai_compatible_provider(

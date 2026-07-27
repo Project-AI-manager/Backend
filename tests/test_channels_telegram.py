@@ -256,6 +256,170 @@ def test_telegram_webhook_creates_conversation_and_auto_reply(
     assert thread_data["messages"][1]["ai_meta"]["provider"] == "mock"
 
 
+def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    created = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    channel_id = uuid.UUID(created.json()["id"])
+
+    async def mark_as_mtproto() -> None:
+        async with session_factory() as session:
+            channel = await session.get(Channel, channel_id)
+            assert channel is not None
+            channel.settings = {**channel.settings, "transport": "mtproto"}
+            await session.commit()
+
+    calls: list[tuple[uuid.UUID, str, str]] = []
+
+    async def fake_mtproto_delivery(channel: Channel, peer_id: str, text: str) -> bool:
+        calls.append((channel.id, peer_id, text))
+        return True
+
+    async def unexpected_bot_delivery(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("MTProto channel must not use Telegram Bot API delivery")
+
+    asyncio.run(mark_as_mtproto())
+    monkeypatch.setattr(
+        "app.services.channels.telegram_mtproto.send_mtproto_message",
+        fake_mtproto_delivery,
+    )
+    monkeypatch.setattr(
+        "app.services.channels.telegram.send_telegram_message",
+        unexpected_bot_delivery,
+    )
+
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1006),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "auto_reply"
+    assert len(calls) == 1
+    assert calls[0][0] == channel_id
+    assert calls[0][1] == "7001"
+
+    thread = client.get(
+        f"/api/v1/conversations/{response.json()['conversation_id']}",
+        headers=auth_headers(),
+    ).json()
+    outbound = thread["messages"][-1]
+    assert outbound["sender_type"] == "ai"
+    assert outbound["status"] == "sent"
+    assert outbound["ai_meta"]["delivery"] == "telegram-mtproto"
+
+
+def test_disabled_bot_delivery_keeps_auto_reply_pending(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    monkeypatch.setattr(settings, "TELEGRAM_DELIVERY_ENABLED", False)
+
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1007),
+    )
+
+    assert response.status_code == 200, response.text
+    thread = client.get(
+        f"/api/v1/conversations/{response.json()['conversation_id']}",
+        headers=auth_headers(),
+    ).json()
+    outbound = thread["messages"][-1]
+    assert outbound["status"] == "pending"
+    assert outbound["ai_meta"]["delivery"] == "delivery-disabled"
+
+
+def test_new_inbound_keeps_escalated_conversation_waiting_for_manager(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+
+    first = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1008, text="Нужна нестандартная интеграция"),
+    )
+    assert first.status_code == 200, first.text
+    conversation_id = first.json()["conversation_id"]
+    client.post(
+        f"/api/v1/conversations/{conversation_id}/escalate",
+        headers=auth_headers(),
+    )
+
+    second = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1009, text="Жду ответа менеджера"),
+    )
+
+    assert second.status_code == 200, second.text
+    assert second.json()["decision"] == "escalate"
+    thread = client.get(
+        f"/api/v1/conversations/{conversation_id}",
+        headers=auth_headers(),
+    ).json()
+    assert thread["status"] == "escalated"
+    assert [message["sender_type"] for message in thread["messages"]] == [
+        "customer",
+        "customer",
+    ]
+
+
+def test_provider_failure_safely_escalates_inbound(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+
+    async def fail_answer(*_args: object, **_kwargs: object) -> object:
+        from app.services.rag.llm import LLMProviderRequestError
+
+        raise LLMProviderRequestError("provider unavailable")
+
+    monkeypatch.setattr(
+        "app.services.ml.service.MLMessageService.answer",
+        fail_answer,
+    )
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1010, text="Нужен ответ"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "escalate"
+    thread = client.get(
+        f"/api/v1/conversations/{response.json()['conversation_id']}",
+        headers=auth_headers(),
+    ).json()
+    assert thread["status"] == "escalated"
+    assert thread["messages"][-1]["ai_meta"]["ai_error"] == "LLMProviderRequestError"
+
+
 def test_telegram_webhook_is_idempotent(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

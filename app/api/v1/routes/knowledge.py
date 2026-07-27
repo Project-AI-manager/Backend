@@ -1,8 +1,10 @@
 """Knowledge base: documents, candidates and playground. Screen: /knowledge."""
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
 from app.api.v1.routes.ml import answer_message
@@ -25,6 +27,12 @@ from app.services.knowledge import (
     list_kb_documents,
     reject_kb_candidate,
 )
+from app.services.knowledge_files import (
+    MAX_UPLOAD_BYTES,
+    KnowledgeFileError,
+    extract_knowledge_file,
+    parse_upload_tags,
+)
 
 router = APIRouter()
 
@@ -43,6 +51,38 @@ async def upload_document(
     user: CurrentUser,
     session: SessionDep,
 ) -> KnowledgeDocumentResponse:
+    return await create_kb_document(session, tenant_id_from_user(user), body)
+
+
+@router.post("/documents/upload", response_model=KnowledgeDocumentResponse)
+async def upload_document_file(
+    file: Annotated[UploadFile, File(description="UTF-8 TXT/MD, PDF, DOCX or XLSX")],
+    user: CurrentUser,
+    session: SessionDep,
+    title: Annotated[str | None, Form(max_length=512)] = None,
+    tags: Annotated[str, Form()] = "{}",
+) -> KnowledgeDocumentResponse:
+    """Extract text from an allow-listed document and index it like manual knowledge."""
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    await file.close()
+    try:
+        parsed_tags = parse_upload_tags(tags)
+        extracted = await run_in_threadpool(
+            extract_knowledge_file,
+            filename=file.filename or "",
+            content_type=file.content_type,
+            data=data,
+            title=title,
+        )
+    except KnowledgeFileError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+    body = KnowledgeDocumentCreate(
+        title=extracted.title,
+        text=extracted.text,
+        source_type=extracted.source_type,
+        tags=parsed_tags,
+    )
     return await create_kb_document(session, tenant_id_from_user(user), body)
 
 

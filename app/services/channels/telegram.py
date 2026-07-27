@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.logging import log
 from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
@@ -27,7 +28,7 @@ from app.services.channels.base import ChannelAdapter, NormalizedMessage
 from app.services.ml.contracts import AssistantProfile, ChatRole, ChatTurn, MLAnswerInput
 from app.services.ml.memory import get_memory_retriever
 from app.services.ml.service import MLMessageService
-from app.services.rag.llm import get_llm
+from app.services.rag.llm import LLMProviderConfigurationError, LLMProviderRequestError, get_llm
 
 
 class TelegramAdapter(ChannelAdapter):
@@ -232,24 +233,71 @@ async def process_telegram_inbound_message(
             decision="auto_reply" if existing_outbound else "escalate",
         )
 
+    if conversation.status == "escalated":
+        inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": "escalate"}
+        conversation.last_message_at = datetime.now(UTC)
+        conversation.last_message_preview = inbound.text
+        conversation.unread_count += 1
+        await session.commit()
+        return ChannelWebhookResponse(
+            ok=True,
+            duplicate=False,
+            channel_id=channel.id,
+            conversation_id=conversation.id,
+            inbound_message_id=inbound.id,
+            decision="escalate",
+        )
+
     tenant = await session.get(Tenant, channel.tenant_id)
     ai_config = await session.get(TenantAIConfig, channel.tenant_id)
-    service = MLMessageService(
-        retriever=await get_memory_retriever(session, channel.tenant_id),
-        llm=get_llm(ai_config.llm_provider if ai_config else "mock"),
-    )
-    history = await _conversation_history(session, conversation.id, exclude_message_id=inbound.id)
-    answer = await service.answer(
-        MLAnswerInput(
-            tenant_id=channel.tenant_id,
-            message=inbound.text,
-            history=tuple(history),
-            profile=AssistantProfile(company_name=tenant.name if tenant else "компания клиента"),
-            custom_system_prompt=ai_config.system_prompt if ai_config else "",
-            confidence_threshold=ai_config.confidence_threshold if ai_config else 80,
-            auto_reply_enabled=ai_config.auto_reply_enabled if ai_config else False,
+    try:
+        service = MLMessageService(
+            retriever=await get_memory_retriever(session, channel.tenant_id),
+            llm=get_llm(ai_config.llm_provider if ai_config else "mock"),
         )
-    )
+        history = await _conversation_history(
+            session,
+            conversation.id,
+            exclude_message_id=inbound.id,
+        )
+        answer = await service.answer(
+            MLAnswerInput(
+                tenant_id=channel.tenant_id,
+                message=inbound.text,
+                history=tuple(history),
+                profile=AssistantProfile(
+                    company_name=tenant.name if tenant else "компания клиента"
+                ),
+                custom_system_prompt=ai_config.system_prompt if ai_config else "",
+                confidence_threshold=ai_config.confidence_threshold if ai_config else 80,
+                auto_reply_enabled=ai_config.auto_reply_enabled if ai_config else False,
+            )
+        )
+    except (LLMProviderConfigurationError, LLMProviderRequestError, httpx.HTTPError) as exc:
+        log.warning(
+            "telegram_ai_processing_failed",
+            tenant_id=str(channel.tenant_id),
+            conversation_id=str(conversation.id),
+            error=str(exc),
+        )
+        inbound.ai_meta = {
+            **(inbound.ai_meta or {}),
+            "decision": "escalate",
+            "ai_error": type(exc).__name__,
+        }
+        conversation.status = "escalated"
+        conversation.last_message_at = datetime.now(UTC)
+        conversation.last_message_preview = inbound.text
+        conversation.unread_count += 1
+        await session.commit()
+        return ChannelWebhookResponse(
+            ok=True,
+            duplicate=False,
+            channel_id=channel.id,
+            conversation_id=conversation.id,
+            inbound_message_id=inbound.id,
+            decision="escalate",
+        )
 
     outbound: Message | None = None
     if answer.decision == "auto_reply":
@@ -262,23 +310,23 @@ async def process_telegram_inbound_message(
             text=answer.answer,
             attachments={},
             external_message_id=external_outbound_id,
-            status="sent",
+            status="pending",
             confidence=answer.confidence,
             ai_meta={
                 "provider": answer.provider,
                 "sources": [source.id for source in answer.sources],
-                "delivery": "telegram-local-noop",
+                "delivery": "delivery-pending",
             },
         )
         session.add(outbound)
         conversation.status = "auto"
-        delivered = await send_telegram_message(
+        delivered, delivery = await _deliver_telegram_reply(
             channel,
             _message_chat_id(inbound),
             answer.answer,
         )
-        if delivered:
-            outbound.ai_meta = {**outbound.ai_meta, "delivery": "telegram-bot-api"}
+        outbound.status = "sent" if delivered else "pending"
+        outbound.ai_meta = {**outbound.ai_meta, "delivery": delivery}
     else:
         conversation.status = "escalated"
 
@@ -313,6 +361,30 @@ async def process_telegram_inbound_message(
         outbound_message_id=outbound.id if outbound else None,
         decision=answer.decision,
     )
+
+
+async def _deliver_telegram_reply(
+    channel: Channel,
+    chat_id: str,
+    text: str,
+) -> tuple[bool, str]:
+    """Deliver through the transport used to connect this Telegram channel.
+
+    The MTProto import stays local because the MTProto ingestion module reuses
+    this module's inbound processor. Importing it at module load time would
+    create a circular import.
+    """
+    transport = str((channel.settings or {}).get("transport") or "")
+    if transport == "mtproto":
+        from app.services.channels.telegram_mtproto import send_mtproto_message
+
+        delivered = await send_mtproto_message(channel, chat_id, text)
+        return delivered, "telegram-mtproto" if delivered else "telegram-mtproto-failed"
+
+    delivered = await send_telegram_message(channel, chat_id, text)
+    if delivered:
+        return True, "telegram-bot-api"
+    return False, "delivery-disabled"
 
 
 def _channel_response(channel: Channel) -> ChannelResponse:

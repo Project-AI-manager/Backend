@@ -6,10 +6,13 @@ Run separately from the API: ``python -m app.workers.telegram_listener``.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from uuid import UUID
 
 from sqlalchemy import select
 from telethon import events  # type: ignore[import-untyped]
 
+from app.core.logging import log
 from app.db.session import SessionLocal
 from app.models.channel import Channel
 from app.schemas.channels import TelegramMTProtoInbound
@@ -53,18 +56,62 @@ async def _run_channel(channel: Channel) -> None:
 
 
 async def main() -> None:
+    """Continuously discover connected accounts and keep one listener per channel.
+
+    Account authorization happens in the API process after this worker may have
+    started. A periodic refresh lets a newly connected account begin receiving
+    messages without requiring an operator to restart the listener.
+    """
+    tasks: dict[UUID, asyncio.Task[None]] = {}
+    try:
+        while True:
+            channels = await _active_channels()
+            active_ids = {channel.id for channel in channels}
+
+            for channel_id, task in list(tasks.items()):
+                if channel_id not in active_ids:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    tasks.pop(channel_id, None)
+
+            for channel in channels:
+                task = tasks.get(channel.id)
+                if task is not None and not task.done():
+                    continue
+                if task is not None:
+                    try:
+                        error = task.exception()
+                        if error is not None:
+                            log.warning(
+                                "telegram_listener_restarting",
+                                channel_id=str(channel.id),
+                                error=str(error),
+                            )
+                    except asyncio.CancelledError:
+                        pass
+                tasks[channel.id] = asyncio.create_task(
+                    _run_channel(channel),
+                    name=f"telegram-listener:{channel.id}",
+                )
+
+            await asyncio.sleep(5)
+    finally:
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+async def _active_channels() -> list[Channel]:
     async with SessionLocal() as session:
         result = await session.execute(
             select(Channel).where(Channel.type == "telegram", Channel.status == "active")
         )
-        channels = [
+        return [
             channel
             for channel in result.scalars().all()
             if (channel.settings or {}).get("transport") == "mtproto"
         ]
-    if not channels:
-        raise RuntimeError("No active Telegram MTProto channels")
-    await asyncio.gather(*(_run_channel(channel) for channel in channels))
 
 
 if __name__ == "__main__":
