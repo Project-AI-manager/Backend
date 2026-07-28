@@ -203,6 +203,7 @@ async def _upsert_users(
         user.role = role
         user.password_hash = password_hash
         user.status = "active"
+        user.email_verified_at = datetime.now(UTC)
         saved.append(user)
         stats.mark(created)
 
