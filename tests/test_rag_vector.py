@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.schema import Table
 
+from app.core.config import settings
 from app.models.knowledge import KbChunk, KbDocument
 from app.models.tenant import Tenant
 from app.services.ml.memory import VectorMemoryRetriever
@@ -25,7 +26,13 @@ from app.services.rag.embeddings import (
     LocalMLEmbedding,
     OpenAICompatibleEmbedding,
 )
-from app.services.rag.vector_store import QdrantVectorStore, VectorPoint, VectorSearchHit
+from app.services.rag.vector_store import (
+    QdrantVectorStore,
+    VectorPoint,
+    VectorSearchHit,
+    _embedded_vector_store,
+    get_vector_store,
+)
 
 TENANT_A = uuid.UUID("55555555-5555-4555-8555-555555555501")
 TENANT_B = uuid.UUID("55555555-5555-4555-8555-555555555502")
@@ -244,6 +251,23 @@ async def test_qdrant_creates_collection_with_configured_dimension() -> None:
     await store.ensure_collection()
 
     assert client.vectors_config.size == 3
+
+
+@pytest.mark.asyncio
+async def test_vector_store_supports_embedded_qdrant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "QDRANT_ENABLED", True)
+    monkeypatch.setattr(settings, "QDRANT_URL", ":memory:")
+
+    store = get_vector_store()
+    same_store = get_vector_store()
+
+    assert isinstance(store, QdrantVectorStore)
+    assert same_store is store
+    await store.ensure_collection()
+    await store.client.close()
+    _embedded_vector_store.cache_clear()
 
 
 @pytest.mark.asyncio

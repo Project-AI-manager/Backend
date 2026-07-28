@@ -51,8 +51,15 @@ async def reindex_knowledge(
             session,
             tenant_id=tenant_id_from_user(user),
         )
-    except RuntimeError as exc:
-        raise HTTPException(503, "Не удалось обновить векторную базу знаний") from exc
+    except KnowledgeIndexingError as exc:
+        raise HTTPException(
+            503,
+            {
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.get("/documents", response_model=list[KnowledgeDocumentResponse])

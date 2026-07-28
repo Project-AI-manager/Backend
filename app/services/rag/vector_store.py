@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -54,14 +55,15 @@ class QdrantVectorStore:
     def __init__(
         self,
         *,
-        url: str,
+        url: str | None = None,
+        path: str | None = None,
         collection: str,
         vector_size: int,
         client: AsyncQdrantClient | None = None,
     ) -> None:
         self.collection = collection
         self.vector_size = vector_size
-        self.client = client or AsyncQdrantClient(url=url)
+        self.client = client or AsyncQdrantClient(url=url, path=path)
 
     async def ensure_collection(self) -> None:
         exists = await self.client.collection_exists(self.collection)
@@ -186,10 +188,33 @@ class QdrantVectorStore:
 def get_vector_store() -> VectorStore | None:
     if not settings.QDRANT_ENABLED:
         return None
+    configured_url = settings.QDRANT_URL.strip()
+    local_path = settings.QDRANT_LOCAL_PATH.strip()
+    if configured_url.lower() in {"local", "embedded", ":memory:"}:
+        return _embedded_vector_store(
+            ":memory:" if configured_url.lower() == ":memory:" else local_path,
+            collection=settings.QDRANT_COLLECTION,
+            vector_size=settings.EMBEDDING_DIMENSION,
+        )
     return QdrantVectorStore(
-        url=settings.QDRANT_URL,
+        url=configured_url,
         collection=settings.QDRANT_COLLECTION,
         vector_size=settings.EMBEDDING_DIMENSION,
+    )
+
+
+@lru_cache(maxsize=4)
+def _embedded_vector_store(
+    path: str,
+    *,
+    collection: str,
+    vector_size: int,
+) -> QdrantVectorStore:
+    """Keep one local client per process because embedded storage holds a file lock."""
+    return QdrantVectorStore(
+        path=path,
+        collection=collection,
+        vector_size=vector_size,
     )
 
 

@@ -99,6 +99,37 @@ async def send_telegram_message(channel: Channel, chat_id: str, text: str) -> bo
     return True
 
 
+async def send_telegram_file(
+    channel: Channel,
+    chat_id: str,
+    file_path: str,
+    caption: str,
+    *,
+    is_image: bool,
+) -> tuple[bool, int | None]:
+    if not settings.TELEGRAM_DELIVERY_ENABLED:
+        return False, None
+    token = decrypt_secret(channel.credentials_encrypted)
+    if not token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Telegram bot token is not configured")
+    method = "sendPhoto" if is_image else "sendDocument"
+    field = "photo" if is_image else "document"
+    try:
+        with open(file_path, "rb") as uploaded:
+            async with httpx.AsyncClient(timeout=settings.TELEGRAM_DELIVERY_TIMEOUT_SEC) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/{method}",
+                    data={"chat_id": chat_id, "caption": caption},
+                    files={field: uploaded},
+                )
+                response.raise_for_status()
+                payload = response.json()
+    except (OSError, httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Telegram delivery failed") from exc
+    raw_id = (payload.get("result") or {}).get("message_id")
+    return True, int(raw_id) if isinstance(raw_id, int) else None
+
+
 async def list_channels(
     session: AsyncSession,
     tenant_id: UUID,
@@ -319,17 +350,38 @@ async def process_telegram_inbound_message(
                 "provider": answer.provider,
                 "sources": [source.id for source in answer.sources],
                 "delivery": "delivery-pending",
+                "chat_id": _message_chat_id(inbound),
+                **(
+                    {"peer_access_hash": inbound.ai_meta["peer_access_hash"]}
+                    if isinstance((inbound.ai_meta or {}).get("peer_access_hash"), int)
+                    else {}
+                ),
             },
         )
         session.add(outbound)
         conversation.status = "auto"
-        delivered, delivery = await _deliver_telegram_reply(
+        delivered, delivery, telegram_message_id = await _deliver_telegram_reply(
             channel,
             _message_chat_id(inbound),
             answer.answer,
+            peer_access_hash=(inbound.ai_meta or {}).get("peer_access_hash"),
         )
-        outbound.status = "sent" if delivered else "pending"
-        outbound.ai_meta = {**outbound.ai_meta, "delivery": delivery}
+        outbound.status = (
+            "sent"
+            if delivered
+            else "failed"
+            if delivery == "telegram-mtproto-failed"
+            else "pending"
+        )
+        outbound.ai_meta = {
+            **outbound.ai_meta,
+            "delivery": delivery,
+            **(
+                {"telegram_message_id": telegram_message_id}
+                if telegram_message_id is not None
+                else {}
+            ),
+        }
     else:
         conversation.status = "escalated"
         await notify_escalation_if_due(session, conversation, inbound.text)
@@ -354,6 +406,10 @@ async def process_telegram_inbound_message(
     await session.commit()
     await session.refresh(inbound)
     if outbound is not None:
+        if outbound.status == "sent" and (channel.settings or {}).get("transport") == "mtproto":
+            from app.services.channels.telegram_mtproto import apply_mtproto_read_watermark
+
+            await apply_mtproto_read_watermark(session, channel.id, outbound)
         await session.refresh(outbound)
 
     return ChannelWebhookResponse(
@@ -371,7 +427,9 @@ async def _deliver_telegram_reply(
     channel: Channel,
     chat_id: str,
     text: str,
-) -> tuple[bool, str]:
+    *,
+    peer_access_hash: object = None,
+) -> tuple[bool, str, int | None]:
     """Deliver through the transport used to connect this Telegram channel.
 
     The MTProto import stays local because the MTProto ingestion module reuses
@@ -382,13 +440,28 @@ async def _deliver_telegram_reply(
     if transport == "mtproto":
         from app.services.channels.telegram_mtproto import send_mtproto_message
 
-        delivered = await send_mtproto_message(channel, chat_id, text)
-        return delivered, "telegram-mtproto" if delivered else "telegram-mtproto-failed"
+        delivery = (
+            await send_mtproto_message(
+                channel,
+                chat_id,
+                text,
+                peer_access_hash=peer_access_hash,
+            )
+            if isinstance(peer_access_hash, int)
+            else await send_mtproto_message(channel, chat_id, text)
+        )
+        delivered = delivery.delivered if hasattr(delivery, "delivered") else bool(delivery)
+        message_id = getattr(delivery, "message_id", None)
+        return (
+            delivered,
+            "telegram-mtproto" if delivered else "telegram-mtproto-failed",
+            message_id,
+        )
 
     delivered = await send_telegram_message(channel, chat_id, text)
     if delivered:
-        return True, "telegram-bot-api"
-    return False, "delivery-disabled"
+        return True, "telegram-bot-api", None
+    return False, "delivery-disabled", None
 
 
 def _channel_response(channel: Channel) -> ChannelResponse:

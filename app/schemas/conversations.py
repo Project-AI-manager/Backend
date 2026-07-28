@@ -16,6 +16,7 @@ class ConversationMessageResponse(BaseModel):
     sender_type: str
     sender_user_id: UUID | None
     text: str
+    attachments: dict
     status: str
     confidence: float | None
     ai_meta: dict

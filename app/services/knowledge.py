@@ -35,6 +35,10 @@ MAX_CHUNK_CHARS = 1200
 class KnowledgeIndexingError(RuntimeError):
     """The SQL document exists, but its vectors could not be made searchable."""
 
+    def __init__(self, message: str, *, code: str = "knowledge_indexing_failed") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def split_text_into_chunks(text: str, *, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     paragraphs = [part.strip() for part in text.replace("\r\n", "\n").split("\n\n") if part.strip()]
@@ -290,16 +294,46 @@ async def index_kb_document(
     chunks = list(result.scalars().all())
     vector_store = get_vector_store()
     if vector_store is None:
-        raise RuntimeError("Qdrant is disabled; set QDRANT_ENABLED=true before reindexing")
+        raise KnowledgeIndexingError(
+            "Векторное хранилище отключено на сервере",
+            code="vector_store_disabled",
+        )
     # Build and validate replacement vectors before deleting the currently searchable points.
     # Qdrant upsert replaces stable chunk IDs, so deletion is unnecessary for current chunks.
-    await _index_chunks(
-        session=session,
-        document=document,
-        chunks=chunks,
-        raise_errors=True,
-    )
+    try:
+        await _index_chunks(
+            session=session,
+            document=document,
+            chunks=chunks,
+            raise_errors=True,
+        )
+    except Exception as exc:
+        raise _knowledge_indexing_error(exc) from exc
     return len(chunks)
+
+
+def _knowledge_indexing_error(exc: Exception) -> KnowledgeIndexingError:
+    """Translate infrastructure/provider failures into a safe Russian API error."""
+    message = str(exc).lower()
+    if "connection" in message or "connect" in message:
+        return KnowledgeIndexingError(
+            "Сервис векторной базы временно недоступен",
+            code="vector_store_unavailable",
+        )
+    if "dimension" in message:
+        return KnowledgeIndexingError(
+            "Размерность эмбеддингов не совпадает с настройками векторной базы",
+            code="embedding_dimension_mismatch",
+        )
+    if "embedding" in message or "fastembed" in message or "model" in message:
+        return KnowledgeIndexingError(
+            "Не удалось построить эмбеддинги для базы знаний",
+            code="embedding_failed",
+        )
+    return KnowledgeIndexingError(
+        "Не удалось сохранить эмбеддинги в векторной базе",
+        code="knowledge_indexing_failed",
+    )
 
 
 async def reindex_ready_documents(

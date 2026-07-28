@@ -50,7 +50,7 @@ class CapturingVectorStore:
 
     async def upsert_chunks(self, points: list[VectorPoint]) -> None:
         if self.fail:
-            raise RuntimeError("index unavailable")
+            raise RuntimeError("connection unavailable")
         self.upserted.extend(points)
 
     async def search(
@@ -314,7 +314,36 @@ def test_reindex_tenant_knowledge_reports_unavailable_vector_store(
     response = client.post("/api/v1/knowledge/reindex", headers=auth_headers())
 
     assert response.status_code == 503
-    assert response.json()["detail"]["message"] == "Не удалось обновить векторную базу знаний"
+    detail = response.json()["detail"]
+    assert detail["code"] == "vector_store_disabled"
+    assert detail["message"] == "Векторное хранилище отключено на сервере"
+    assert detail["retryable"] is True
+
+
+def test_reindex_tenant_knowledge_reports_vector_store_connection_failure(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.knowledge.get_vector_store",
+        lambda: CapturingVectorStore(fail=True),
+    )
+    asyncio.run(seed_tenant(session_factory))
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={"title": "FAQ", "source_type": "manual", "text": "Knowledge"},
+    )
+    assert created.status_code == 200, created.text
+
+    response = client.post("/api/v1/knowledge/reindex", headers=auth_headers())
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "vector_store_unavailable"
+    assert detail["message"] == "Сервис векторной базы временно недоступен"
+    assert detail["retryable"] is True
 
 
 def test_create_knowledge_document_survives_vector_index_failure(

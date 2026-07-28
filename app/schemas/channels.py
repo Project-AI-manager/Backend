@@ -63,6 +63,7 @@ class TelegramAccountAuthResponse(BaseModel):
 
 class TelegramMTProtoInbound(BaseModel):
     peer_id: int
+    peer_access_hash: int | None = None
     sender_id: int
     message_id: int
     text: str

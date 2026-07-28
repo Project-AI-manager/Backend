@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://app:app@localhost:5432/ai_manager"
     REDIS_URL: str = "redis://localhost:6379/0"
     QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_LOCAL_PATH: str = ".qdrant-data"
     QDRANT_COLLECTION: str = "ai_manager_knowledge"
     QDRANT_ENABLED: bool = False
 
@@ -33,6 +34,8 @@ class Settings(BaseSettings):
     S3_ACCESS_KEY: str = "minioadmin"
     S3_SECRET_KEY: str = "minioadmin"
     S3_BUCKET: str = "ai-manager"
+    CONVERSATION_UPLOAD_DIR: str = ".conversation-uploads"
+    CONVERSATION_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
 
     LLM_PROVIDER: str = "mock"
     EMBEDDING_PROVIDER: str = "local"

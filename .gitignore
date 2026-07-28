@@ -6,6 +6,8 @@ __pycache__/
 .logs/
 .uv/
 .model-cache/
+.qdrant-data/
+.conversation-uploads/
 *.egg-info/
 
 # Env / secrets

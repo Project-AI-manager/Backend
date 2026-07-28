@@ -46,6 +46,9 @@ uv run uvicorn app.main:app --reload
 
 Для локальных semantic embeddings используйте `EMBEDDING_PROVIDER=local-ml`, модель `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, размерность `384` и новую Qdrant collection. Модель скачивается один раз в `EMBEDDING_CACHE_DIR` и исполняется на CPU через ONNX/FastEmbed.
 
+Если Docker/Qdrant-сервер не запущен, задайте `QDRANT_URL=local`: backend
+использует встроенное хранилище Qdrant и сохраняет его в `QDRANT_LOCAL_PATH`.
+
 OpenAI-compatible embeddings use `EMBEDDING_PROVIDER=openai-compatible` and the
 `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, and
 `EMBEDDING_DIMENSION` variables. `EMBEDDING_DIMENSION` must match the selected model

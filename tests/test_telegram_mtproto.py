@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,6 +21,7 @@ from app.core.security import create_token
 from app.db.session import get_session
 from app.main import app
 from app.models.channel import Channel
+from app.models.conversation import Conversation, Customer, Message
 from app.models.tenant import Tenant
 from app.models.user import User
 
@@ -35,7 +37,14 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
         poolclass=StaticPool,
     )
     async with engine.begin() as conn:
-        for table in (Tenant.__table__, User.__table__, Channel.__table__):
+        for table in (
+            Tenant.__table__,
+            User.__table__,
+            Channel.__table__,
+            Customer.__table__,
+            Conversation.__table__,
+            Message.__table__,
+        ):
             await conn.run_sync(lambda connection, item=table: cast(Table, item).create(connection))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
@@ -154,3 +163,236 @@ def test_personal_account_requires_application_credentials(
         json={"phone": "+79990001122"},
     )
     assert response.status_code == 503
+
+
+def test_mtproto_delivery_uses_access_hash_and_returns_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    sent_to: list[object] = []
+
+    class FakeClient:
+        async def send_message(self, peer: object, text: str) -> object:
+            sent_to.append(peer)
+            assert text == "Ответ"
+            return SimpleNamespace(id=4242)
+
+        async def disconnect(self) -> None: ...
+
+    async def fake_authorized_client(_channel: Channel) -> FakeClient:
+        return FakeClient()
+
+    monkeypatch.setattr(telegram_mtproto, "create_authorized_client", fake_authorized_client)
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=TENANT_ID,
+        type="telegram",
+        name="Telegram",
+        status="active",
+        credentials_encrypted="encrypted",
+        settings={"transport": "mtproto"},
+    )
+
+    result = asyncio.run(
+        telegram_mtproto.send_mtproto_message(
+            channel,
+            "6154961834",
+            "Ответ",
+            peer_access_hash=987654321,
+        )
+    )
+
+    assert result.delivered is True
+    assert result.message_id == 4242
+    assert sent_to[0].user_id == 6154961834
+    assert sent_to[0].access_hash == 987654321
+
+
+def test_mtproto_delivery_refreshes_dialogs_for_legacy_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    legacy_peer = object()
+
+    class FakeClient:
+        async def get_input_entity(self, _peer_id: int) -> object:
+            raise ValueError("entity cache is empty")
+
+        async def iter_dialogs(self):
+            yield SimpleNamespace(id=6154961834, input_entity=legacy_peer)
+
+        async def send_message(self, peer: object, _text: str) -> object:
+            assert peer is legacy_peer
+            return SimpleNamespace(id=500)
+
+        async def disconnect(self) -> None: ...
+
+    async def fake_authorized_client(_channel: Channel) -> FakeClient:
+        return FakeClient()
+
+    monkeypatch.setattr(telegram_mtproto, "create_authorized_client", fake_authorized_client)
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=TENANT_ID,
+        type="telegram",
+        name="Telegram",
+        status="active",
+        credentials_encrypted="encrypted",
+        settings={"transport": "mtproto"},
+    )
+
+    result = asyncio.run(telegram_mtproto.send_mtproto_message(channel, "6154961834", "Ответ"))
+
+    assert result.delivered is True
+    assert result.message_id == 500
+
+
+def test_mtproto_client_setup_failure_becomes_bad_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    async def fail_authorization(_channel: Channel) -> object:
+        raise RuntimeError("session is no longer authorized")
+
+    monkeypatch.setattr(telegram_mtproto, "create_authorized_client", fail_authorization)
+    channel = Channel(
+        id=uuid.uuid4(),
+        tenant_id=TENANT_ID,
+        type="telegram",
+        name="Telegram",
+        status="active",
+        credentials_encrypted="encrypted",
+        settings={"transport": "mtproto"},
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(telegram_mtproto.send_mtproto_message(channel, "7001", "Ответ"))
+
+    assert error.value.status_code == 502
+
+
+def test_mtproto_read_receipt_marks_sent_outbound_messages_read(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.channels.telegram_mtproto import mark_mtproto_messages_read
+
+    channel_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+
+    async def seed_and_mark() -> tuple[int, dict[int, str]]:
+        async with session_factory() as session:
+            session.add(
+                Channel(
+                    id=channel_id,
+                    tenant_id=TENANT_ID,
+                    type="telegram",
+                    name="Telegram",
+                    status="active",
+                    credentials_encrypted="encrypted",
+                    settings={"transport": "mtproto"},
+                )
+            )
+            session.add(Customer(id=customer_id, tenant_id=TENANT_ID, display_name="Клиент"))
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    tenant_id=TENANT_ID,
+                    customer_id=customer_id,
+                    channel_id=channel_id,
+                    status="answered",
+                    unread_count=0,
+                )
+            )
+            for telegram_id in (41, 43):
+                session.add(
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation_id,
+                        direction="outbound",
+                        sender_type="manager",
+                        text=f"Ответ {telegram_id}",
+                        status="sent",
+                        ai_meta={"chat_id": "7001", "telegram_message_id": telegram_id},
+                    )
+                )
+            await session.commit()
+            changed = await mark_mtproto_messages_read(
+                session,
+                channel_id,
+                peer_id=7001,
+                max_message_id=41,
+            )
+            result = await session.execute(select(Message))
+            return changed, {
+                int(message.ai_meta["telegram_message_id"]): message.status
+                for message in result.scalars().all()
+            }
+
+    changed, statuses = asyncio.run(seed_and_mark())
+    assert changed == 1
+    assert statuses == {41: "read", 43: "sent"}
+
+
+def test_read_watermark_closes_receipt_before_message_commit_race(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.channels.telegram_mtproto import (
+        apply_mtproto_read_watermark,
+        mark_mtproto_messages_read,
+    )
+
+    channel_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+
+    async def seed_and_apply() -> tuple[int, str]:
+        async with session_factory() as session:
+            channel = Channel(
+                id=channel_id,
+                tenant_id=TENANT_ID,
+                type="telegram",
+                name="Telegram",
+                status="active",
+                credentials_encrypted="encrypted",
+                settings={"transport": "mtproto"},
+            )
+            session.add(channel)
+            session.add(Customer(id=customer_id, tenant_id=TENANT_ID, display_name="Клиент"))
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    tenant_id=TENANT_ID,
+                    customer_id=customer_id,
+                    channel_id=channel_id,
+                    status="answered",
+                    unread_count=0,
+                )
+            )
+            await session.commit()
+            changed = await mark_mtproto_messages_read(
+                session,
+                channel_id,
+                peer_id=7001,
+                max_message_id=52,
+            )
+            message = Message(
+                tenant_id=TENANT_ID,
+                conversation_id=conversation_id,
+                direction="outbound",
+                sender_type="manager",
+                text="Уже прочитано",
+                status="sent",
+                ai_meta={"chat_id": "7001", "telegram_message_id": 52},
+            )
+            session.add(message)
+            await session.commit()
+            applied = await apply_mtproto_read_watermark(session, channel_id, message)
+            return changed, message.status if applied else "not-applied"
+
+    changed, final_status = asyncio.run(seed_and_apply())
+    assert changed == 0
+    assert final_status == "read"

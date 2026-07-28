@@ -173,6 +173,11 @@ async def probe_qdrant() -> IntegrationProbeResponse:
         "enabled": settings.QDRANT_ENABLED,
         "url": settings.QDRANT_URL,
         "collection": settings.QDRANT_COLLECTION,
+        "mode": (
+            "embedded"
+            if settings.QDRANT_URL.strip().lower() in {"local", "embedded", ":memory:"}
+            else "remote"
+        ),
     }
     if not settings.QDRANT_ENABLED:
         return IntegrationProbeResponse(

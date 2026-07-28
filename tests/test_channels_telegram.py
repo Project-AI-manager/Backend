@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Generator
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -296,9 +297,14 @@ def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
 
     calls: list[tuple[uuid.UUID, str, str]] = []
 
-    async def fake_mtproto_delivery(channel: Channel, peer_id: str, text: str) -> bool:
+    async def fake_mtproto_delivery(
+        channel: Channel,
+        peer_id: str,
+        text: str,
+        **_kwargs: object,
+    ) -> object:
         calls.append((channel.id, peer_id, text))
-        return True
+        return SimpleNamespace(delivered=True, message_id=101)
 
     async def unexpected_bot_delivery(*_args: object, **_kwargs: object) -> bool:
         raise AssertionError("MTProto channel must not use Telegram Bot API delivery")
@@ -328,10 +334,13 @@ def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
         f"/api/v1/conversations/{response.json()['conversation_id']}",
         headers=auth_headers(),
     ).json()
-    outbound = thread["messages"][-1]
+    outbound = next(
+        message for message in thread["messages"] if message["direction"] == "outbound"
+    )
     assert outbound["sender_type"] == "ai"
     assert outbound["status"] == "sent"
     assert outbound["ai_meta"]["delivery"] == "telegram-mtproto"
+    assert outbound["ai_meta"]["telegram_message_id"] == 101
 
 
 def test_disabled_bot_delivery_keeps_auto_reply_pending(
@@ -357,7 +366,9 @@ def test_disabled_bot_delivery_keeps_auto_reply_pending(
         f"/api/v1/conversations/{response.json()['conversation_id']}",
         headers=auth_headers(),
     ).json()
-    outbound = thread["messages"][-1]
+    outbound = next(
+        message for message in thread["messages"] if message["direction"] == "outbound"
+    )
     assert outbound["status"] == "pending"
     assert outbound["ai_meta"]["delivery"] == "delivery-disabled"
 

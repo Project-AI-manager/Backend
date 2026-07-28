@@ -14,11 +14,12 @@ from telethon.errors import (  # type: ignore[import-untyped]
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
+from telethon.tl.types import InputPeerUser  # type: ignore[import-untyped]
 
 from app.core.config import settings
 from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models.channel import Channel
-from app.models.conversation import Message
+from app.models.conversation import Conversation, Message
 from app.schemas.channels import (
     TelegramAccountAuthResponse,
     TelegramAccountStartResponse,
@@ -40,6 +41,12 @@ class PendingTelegramAuth:
 
 
 _pending_auth: dict[UUID, PendingTelegramAuth] = {}
+
+
+@dataclass(frozen=True)
+class TelegramMTProtoDelivery:
+    delivered: bool
+    message_id: int | None = None
 
 
 def _application_credentials() -> tuple[int, str]:
@@ -185,15 +192,97 @@ async def create_authorized_client(channel: Channel) -> TelegramClient:
     return client
 
 
-async def send_mtproto_message(channel: Channel, peer_id: str, text: str) -> bool:
-    client = await create_authorized_client(channel)
+async def send_mtproto_message(
+    channel: Channel,
+    peer_id: str,
+    text: str,
+    *,
+    peer_access_hash: int | None = None,
+) -> TelegramMTProtoDelivery:
+    client: TelegramClient | None = None
     try:
-        await client.send_message(int(peer_id), text)
+        client = await create_authorized_client(channel)
+        peer = await _resolve_peer(client, int(peer_id), peer_access_hash)
+        sent = await client.send_message(peer, text)
     except FloodWaitError:
-        return False
+        return TelegramMTProtoDelivery(delivered=False)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            (
+                "Не удалось найти получателя в Telegram. "
+                "Получите от него новое сообщение и повторите отправку."
+            ),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Не удалось отправить сообщение в Telegram. Попробуйте ещё раз.",
+        ) from exc
     finally:
-        await client.disconnect()
-    return True
+        if client is not None:
+            await client.disconnect()
+    message_id = getattr(sent, "id", None)
+    return TelegramMTProtoDelivery(
+        delivered=True,
+        message_id=int(message_id) if message_id is not None else None,
+    )
+
+
+async def send_mtproto_file(
+    channel: Channel,
+    peer_id: str,
+    file_path: str,
+    caption: str,
+    *,
+    peer_access_hash: int | None = None,
+    force_document: bool = True,
+) -> TelegramMTProtoDelivery:
+    client: TelegramClient | None = None
+    try:
+        client = await create_authorized_client(channel)
+        peer = await _resolve_peer(client, int(peer_id), peer_access_hash)
+        sent = await client.send_file(
+            peer,
+            file_path,
+            caption=caption or None,
+            force_document=force_document,
+        )
+    except FloodWaitError:
+        return TelegramMTProtoDelivery(delivered=False)
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Не удалось отправить вложение в Telegram. Попробуйте ещё раз.",
+        ) from exc
+    finally:
+        if client is not None:
+            await client.disconnect()
+    message_id = getattr(sent, "id", None)
+    return TelegramMTProtoDelivery(
+        delivered=True,
+        message_id=int(message_id) if message_id is not None else None,
+    )
+
+
+async def _resolve_peer(
+    client: TelegramClient,
+    peer_id: int,
+    peer_access_hash: int | None,
+) -> object:
+    if peer_access_hash is not None:
+        return InputPeerUser(user_id=peer_id, access_hash=peer_access_hash)
+
+    try:
+        return await client.get_input_entity(peer_id)
+    except ValueError:
+        # StringSession intentionally does not persist Telegram's entity cache.
+        # Refresh the dialogs so replies to conversations created by an older
+        # application version can still resolve their recipient.
+        async for dialog in client.iter_dialogs():
+            if int(dialog.id) == peer_id:
+                return dialog.input_entity
+        raise
 
 
 async def ingest_mtproto_message(
@@ -231,12 +320,92 @@ async def ingest_mtproto_message(
         external_message_id=normalized.external_message_id,
         status="received",
         confidence=None,
-        ai_meta={"source": "telegram", "chat_id": str(inbound.peer_id), "transport": "mtproto"},
+        ai_meta={
+            "source": "telegram",
+            "chat_id": str(inbound.peer_id),
+            "transport": "mtproto",
+            **(
+                {"peer_access_hash": inbound.peer_access_hash}
+                if inbound.peer_access_hash is not None
+                else {}
+            ),
+        },
     )
     session.add(message)
     await session.commit()
     await process_telegram_inbound_message(session, message.id)
     return conversation.id
+
+
+async def mark_mtproto_messages_read(
+    session: AsyncSession,
+    channel_id: UUID,
+    *,
+    peer_id: int,
+    max_message_id: int,
+) -> int:
+    """Persist Telegram's read watermark and mark all matching outgoing messages read."""
+    channel = await session.get(Channel, channel_id)
+    if channel is None:
+        return 0
+    settings_json = channel.settings or {}
+    raw_watermarks = settings_json.get("read_watermarks")
+    watermarks = dict(raw_watermarks) if isinstance(raw_watermarks, dict) else {}
+    watermark_key = str(peer_id)
+    previous = watermarks.get(watermark_key)
+    previous_id = previous if isinstance(previous, int) else 0
+    watermarks[watermark_key] = max(previous_id, max_message_id)
+    channel.settings = {**settings_json, "read_watermarks": watermarks}
+
+    result = await session.execute(
+        select(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Conversation.channel_id == channel_id,
+            Message.direction == "outbound",
+            Message.status == "sent",
+        )
+    )
+    changed = 0
+    for message in result.scalars().all():
+        metadata = message.ai_meta or {}
+        telegram_message_id = metadata.get("telegram_message_id")
+        if str(metadata.get("chat_id") or "") != str(peer_id):
+            continue
+        if not isinstance(telegram_message_id, int) or telegram_message_id > max_message_id:
+            continue
+        message.status = "read"
+        changed += 1
+    await session.commit()
+    return changed
+
+
+async def apply_mtproto_read_watermark(
+    session: AsyncSession,
+    channel_id: UUID,
+    message: Message,
+) -> bool:
+    """Close the send/read race when Telegram reports a read before send is committed."""
+    channel = await session.get(Channel, channel_id, populate_existing=True)
+    metadata = message.ai_meta or {}
+    if channel is None:
+        return False
+    raw_watermarks = (channel.settings or {}).get("read_watermarks")
+    if not isinstance(raw_watermarks, dict):
+        return False
+    chat_id = str(metadata.get("chat_id") or "")
+    telegram_message_id = metadata.get("telegram_message_id")
+    watermark = raw_watermarks.get(chat_id)
+    if (
+        message.status != "sent"
+        or not isinstance(telegram_message_id, int)
+        or not isinstance(watermark, int)
+        or telegram_message_id > watermark
+    ):
+        return False
+    message.status = "read"
+    await session.commit()
+    return True
 
 
 async def _tenant_telegram_channel(session: AsyncSession, tenant_id: UUID) -> Channel | None:
