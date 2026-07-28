@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AdminUser, CurrentUser, SessionDep, tenant_id_from_user
 from app.core.config import settings
-from app.models.ops import Plan, Subscription, UsageCounter
+from app.models.ops import BillingAccount, Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant, TenantAIConfig
 from app.schemas.settings import (
     LLM_PROVIDERS,
@@ -21,6 +21,7 @@ from app.schemas.settings import (
 )
 
 router = APIRouter()
+
 
 @router.get("/ai", response_model=AISettingsResponse)
 async def get_ai_settings(user: CurrentUser, session: SessionDep) -> AISettingsResponse:
@@ -87,6 +88,7 @@ async def update_workspace_settings(
 @router.get("/billing", response_model=BillingSettingsResponse)
 async def get_billing(user: CurrentUser, session: SessionDep) -> BillingSettingsResponse:
     tenant_id = tenant_id_from_user(user)
+    account = await _get_or_create_billing_account(session, tenant_id)
     subscription_result = await session.execute(
         select(Subscription, Plan)
         .join(Plan, Subscription.plan_id == Plan.id)
@@ -113,6 +115,8 @@ async def get_billing(user: CurrentUser, session: SessionDep) -> BillingSettings
             dialogs_limit=0,
             ai_replies_used=usage.ai_replies_count if usage else 0,
             channel_limit=0,
+            balance_kopecks=account.balance_kopecks,
+            expenses_kopecks=usage.expenses_kopecks if usage else 0,
         )
 
     subscription, plan = subscription_row
@@ -124,7 +128,25 @@ async def get_billing(user: CurrentUser, session: SessionDep) -> BillingSettings
         dialogs_limit=plan.dialog_limit,
         ai_replies_used=usage.ai_replies_count if usage else 0,
         channel_limit=plan.channel_limit,
+        balance_kopecks=account.balance_kopecks,
+        expenses_kopecks=usage.expenses_kopecks if usage else 0,
     )
+
+
+async def _get_or_create_billing_account(
+    session: AsyncSession,
+    tenant_id: UUID,
+) -> BillingAccount:
+    result = await session.execute(
+        select(BillingAccount).where(BillingAccount.tenant_id == tenant_id)
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        account = BillingAccount(tenant_id=tenant_id, balance_kopecks=100_000)
+        session.add(account)
+        await session.commit()
+        await session.refresh(account)
+    return account
 
 
 async def _get_or_create_ai_config(session: AsyncSession, tenant_id: UUID) -> TenantAIConfig:

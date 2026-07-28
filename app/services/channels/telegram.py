@@ -25,6 +25,7 @@ from app.schemas.channels import (
     ChannelWebhookResponse,
 )
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
+from app.services.escalation_notifications import notify_escalation_if_due
 from app.services.ml.contracts import AssistantProfile, ChatRole, ChatTurn, MLAnswerInput
 from app.services.ml.memory import get_memory_retriever
 from app.services.ml.service import MLMessageService
@@ -238,6 +239,7 @@ async def process_telegram_inbound_message(
         conversation.last_message_at = datetime.now(UTC)
         conversation.last_message_preview = inbound.text
         conversation.unread_count += 1
+        await notify_escalation_if_due(session, conversation, inbound.text)
         await session.commit()
         return ChannelWebhookResponse(
             ok=True,
@@ -289,6 +291,7 @@ async def process_telegram_inbound_message(
         conversation.last_message_at = datetime.now(UTC)
         conversation.last_message_preview = inbound.text
         conversation.unread_count += 1
+        await notify_escalation_if_due(session, conversation, inbound.text)
         await session.commit()
         return ChannelWebhookResponse(
             ok=True,
@@ -329,6 +332,7 @@ async def process_telegram_inbound_message(
         outbound.ai_meta = {**outbound.ai_meta, "delivery": delivery}
     else:
         conversation.status = "escalated"
+        await notify_escalation_if_due(session, conversation, inbound.text)
 
     inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": answer.decision}
 

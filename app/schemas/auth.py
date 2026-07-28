@@ -1,7 +1,8 @@
 """Pydantic-схемы аутентификации."""
+
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 
 class LoginRequest(BaseModel):
@@ -61,3 +62,15 @@ class UserMeResponse(BaseModel):
     role: str
     status: str
     email_verified: bool = False
+
+
+class NotificationSettingsResponse(BaseModel):
+    escalation_email_enabled: bool
+    daily_digest_email_enabled: bool
+
+
+class NotificationSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    escalation_email_enabled: bool | None = None
+    daily_digest_email_enabled: bool | None = None

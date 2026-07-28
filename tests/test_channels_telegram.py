@@ -21,13 +21,19 @@ from app.db.session import get_session
 from app.main import app
 from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
+from app.models.email import EmailOutbox
 from app.models.knowledge import KbChunk, KbDocument
 from app.models.tenant import Tenant, TenantAIConfig
-from app.models.user import User
+from app.models.user import User, UserNotificationSettings
 from app.services.channels.telegram import process_telegram_inbound_message
 
 TENANT_ID = uuid.UUID("44444444-4444-4444-8444-444444444401")
 USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444402")
+
+
+@pytest.fixture(autouse=True)
+def disable_real_email_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "EMAIL_SEND_ENABLED", False)
 
 
 def create_table(sync_connection: Connection, table: object) -> None:
@@ -46,6 +52,8 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             Tenant.__table__,
             TenantAIConfig.__table__,
             User.__table__,
+            UserNotificationSettings.__table__,
+            EmailOutbox.__table__,
             Channel.__table__,
             WebhookEvent.__table__,
             Customer.__table__,
@@ -163,6 +171,16 @@ async def count_rows(
     async with session_factory() as session:
         result = await session.execute(select(func.count()).select_from(model))
         return int(result.scalar_one())
+
+
+async def escalation_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[EmailOutbox]:
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EmailOutbox).where(EmailOutbox.purpose == "escalation_alert")
+        )
+        return list(result.scalars().all())
 
 
 def test_connect_and_list_telegram_channel(
@@ -382,6 +400,16 @@ def test_new_inbound_keeps_escalated_conversation_waiting_for_manager(
         "customer",
         "customer",
     ]
+    outbox = asyncio.run(escalation_outbox(session_factory))
+    assert len(outbox) == 1
+    assert outbox[0].metadata_json["conversation_id"] == conversation_id
+
+    third = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1011, text="Есть ещё вопрос"),
+    )
+    assert third.status_code == 200, third.text
+    assert len(asyncio.run(escalation_outbox(session_factory))) == 1
 
 
 def test_provider_failure_safely_escalates_inbound(

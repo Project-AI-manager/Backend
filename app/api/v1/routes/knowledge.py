@@ -16,15 +16,18 @@ from app.schemas.knowledge import (
     KnowledgeDocumentDetailResponse,
     KnowledgeDocumentResponse,
     KnowledgeDocumentStatusResponse,
+    KnowledgeReindexResponse,
 )
 from app.schemas.ml import MLAnswerRequest, MLAnswerResponse
 from app.services.knowledge import (
+    KnowledgeIndexingError,
     approve_kb_candidate,
     archive_kb_document,
     create_kb_document,
     get_kb_document,
     list_kb_candidates,
     list_kb_documents,
+    reindex_tenant_knowledge,
     reject_kb_candidate,
 )
 from app.services.knowledge_files import (
@@ -35,6 +38,21 @@ from app.services.knowledge_files import (
 )
 
 router = APIRouter()
+
+
+@router.post("/reindex", response_model=KnowledgeReindexResponse)
+async def reindex_knowledge(
+    user: CurrentUser,
+    session: SessionDep,
+) -> KnowledgeReindexResponse:
+    """Synchronously rebuild this tenant's searchable vectors in Qdrant."""
+    try:
+        return await reindex_tenant_knowledge(
+            session,
+            tenant_id=tenant_id_from_user(user),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(503, "Не удалось обновить векторную базу знаний") from exc
 
 
 @router.get("/documents", response_model=list[KnowledgeDocumentResponse])
@@ -83,7 +101,16 @@ async def upload_document_file(
         source_type=extracted.source_type,
         tags=parsed_tags,
     )
-    return await create_kb_document(session, tenant_id_from_user(user), body)
+    tenant_id = tenant_id_from_user(user)
+    try:
+        return await create_kb_document(
+            session,
+            tenant_id,
+            body,
+            require_vector_index=True,
+        )
+    except KnowledgeIndexingError as exc:
+        raise HTTPException(503, "Не удалось создать векторную базу знаний") from exc
 
 
 @router.get("/documents/{document_id}", response_model=KnowledgeDocumentDetailResponse)

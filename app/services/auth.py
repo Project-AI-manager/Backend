@@ -1,4 +1,5 @@
 """Auth service: registration, login and refresh-token rotation."""
+
 import re
 import secrets
 import uuid
@@ -18,6 +19,7 @@ from app.core.security import (
     refresh_token_expires_at,
     verify_password,
 )
+from app.models.ops import BillingAccount
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import RefreshToken, User
 from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, TokenPair
@@ -62,7 +64,7 @@ async def register_user(session: AsyncSession, body: RegisterRequest) -> TokenPa
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists",
+            detail="Пользователь с такой почтой уже существует",
         )
 
     tenant = Tenant(
@@ -72,6 +74,9 @@ async def register_user(session: AsyncSession, body: RegisterRequest) -> TokenPa
     )
     session.add(tenant)
     await session.flush()
+
+    # Every new workspace starts with a 1,000 RUB launch bonus.
+    session.add(BillingAccount(tenant_id=tenant.id, balance_kopecks=100_000))
 
     session.add(
         TenantAIConfig(
@@ -106,7 +111,7 @@ async def login_user(session: AsyncSession, body: LoginRequest) -> TokenPair:
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail="Неверная почта или пароль",
         )
 
     tokens = _token_pair_for_user(user)

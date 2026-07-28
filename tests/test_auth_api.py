@@ -1,4 +1,5 @@
 """Auth API tests: register, login, refresh and current user profile."""
+
 import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import cast
@@ -14,6 +15,7 @@ from sqlalchemy.sql.schema import Table
 from app.core.config import settings
 from app.db.session import get_session
 from app.main import app
+from app.models.ops import BillingAccount
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import RefreshToken, User
 
@@ -34,6 +36,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             Tenant.__table__,
             TenantAIConfig.__table__,
             User.__table__,
+            BillingAccount.__table__,
             RefreshToken.__table__,
         ):
             await conn.run_sync(create_table, table)
@@ -102,6 +105,20 @@ def test_register_uses_runtime_ai_defaults(
     config = asyncio.run(load_config())
     assert config.llm_provider == settings.LLM_PROVIDER
     assert config.embedding_model == settings.EMBEDDING_MODEL
+
+
+def test_register_creates_bonus_billing_account(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    register(client)
+
+    async def load_account() -> BillingAccount:
+        async with session_factory() as session:
+            result = await session.execute(select(BillingAccount))
+            return result.scalar_one()
+
+    assert asyncio.run(load_account()).balance_kopecks == 100_000
 
 
 def test_login_returns_new_token_pair(client: TestClient) -> None:
@@ -184,7 +201,7 @@ def test_register_rejects_duplicate_email(client: TestClient) -> None:
     assert resp.status_code == 409
     assert resp.json()["detail"] == {
         "code": "conflict",
-        "message": "User with this email already exists",
-        "msg": "User with this email already exists",
+        "message": "Пользователь с такой почтой уже существует",
+        "msg": "Пользователь с такой почтой уже существует",
         "errors": [],
     }

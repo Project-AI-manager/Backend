@@ -16,6 +16,7 @@ from app.services.conversations import (
     escalate_conversation,
     get_conversation_thread,
     list_conversations,
+    mark_conversation_read,
     reply_to_conversation,
 )
 
@@ -38,6 +39,19 @@ async def get_conversation(
     session: SessionDep,
 ) -> ConversationThreadResponse:
     return await get_conversation_thread(session, tenant_id_from_user(user), conversation_id)
+
+
+@router.post("/{conversation_id}/read", response_model=ConversationThreadResponse)
+async def mark_read(
+    conversation_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ConversationThreadResponse:
+    return await mark_conversation_read(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
+    )
 
 
 @router.post("/{conversation_id}/reply", response_model=ConversationActionResponse)

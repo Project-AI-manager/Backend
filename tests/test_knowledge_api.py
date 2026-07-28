@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import uuid
+import zipfile
 from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, datetime
 from typing import cast
@@ -264,6 +266,57 @@ def test_create_knowledge_document_indexes_vector_chunks(
     assert any(value != 0 for value in point.vector)
 
 
+def test_reindex_tenant_knowledge_indexes_ready_documents(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vector_store = CapturingVectorStore()
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: vector_store)
+    asyncio.run(seed_tenant(session_factory))
+
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={
+            "title": "Vector FAQ",
+            "source_type": "manual",
+            "text": "Vector search should index this chunk.",
+            "tags": {"topic": "rag"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    vector_store.upserted.clear()
+
+    response = client.post("/api/v1/knowledge/reindex", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["documents_count"] == 1
+    assert response.json()["chunks_count"] == 1
+    assert response.json()["updated_at"] is not None
+    assert len(vector_store.upserted) == 1
+
+
+def test_reindex_tenant_knowledge_reports_unavailable_vector_store(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: None)
+    asyncio.run(seed_tenant(session_factory))
+    created = client.post(
+        "/api/v1/knowledge/documents",
+        headers=auth_headers(),
+        json={"title": "FAQ", "source_type": "manual", "text": "Knowledge"},
+    )
+    assert created.status_code == 200, created.text
+
+    response = client.post("/api/v1/knowledge/reindex", headers=auth_headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["message"] == "Не удалось обновить векторную базу знаний"
+
+
 def test_create_knowledge_document_survives_vector_index_failure(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -407,6 +460,57 @@ def test_upload_structured_knowledge_file(
     assert expected_text in detail.json()["chunks"][0]["text"]
 
 
+def test_upload_xlsx_without_optional_dimensions(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", lambda: None)
+    asyncio.run(seed_tenant(session_factory))
+
+    created = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={
+            "file": (
+                "knowledge.xlsx",
+                _xlsx_without_dimensions_bytes("Telegram setup guide"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    detail = client.get(
+        f"/api/v1/knowledge/documents/{created.json()['id']}",
+        headers=auth_headers(),
+    )
+    assert "Лист: Knowledge" in detail.json()["chunks"][0]["text"]
+    assert "Telegram setup guide" in detail.json()["chunks"][0]["text"]
+
+
+def test_upload_invalid_xlsx_returns_russian_error(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+
+    response = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={
+            "file": (
+                "knowledge.xlsx",
+                b"not a zip archive",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"]["message"] == ("Загруженный файл не является корректным XLSX")
+
+
 def test_upload_rejects_unsupported_and_oversized_files(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -497,6 +601,21 @@ def _xlsx_bytes(text: str) -> bytes:
     workbook.save(stream)
     workbook.close()
     return stream.getvalue()
+
+
+def _xlsx_without_dimensions_bytes(text: str) -> bytes:
+    source = io.BytesIO(_xlsx_bytes(text))
+    result = io.BytesIO()
+    with (
+        zipfile.ZipFile(source) as source_archive,
+        zipfile.ZipFile(result, "w", zipfile.ZIP_DEFLATED) as result_archive,
+    ):
+        for member in source_archive.infolist():
+            data = source_archive.read(member.filename)
+            if member.filename.startswith("xl/worksheets/sheet"):
+                data = re.sub(rb"<dimension\b[^>]*/>", b"", data, count=1)
+            result_archive.writestr(member, data)
+    return result.getvalue()
 
 
 def test_create_knowledge_document_uses_tenant_embedding_model(

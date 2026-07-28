@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.security import create_token
 from app.db.session import get_session
 from app.main import app
-from app.models.ops import Plan, Subscription, UsageCounter
+from app.models.ops import BillingAccount, Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User
 
@@ -45,6 +45,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             TenantAIConfig.__table__,
             Plan.__table__,
             Subscription.__table__,
+            BillingAccount.__table__,
             UsageCounter.__table__,
         ):
             await conn.run_sync(create_table, table)
@@ -125,6 +126,7 @@ async def seed_tenant(
                     period=datetime.now(UTC).strftime("%Y-%m"),
                     dialogs_count=7,
                     ai_replies_count=3,
+                    expenses_kopecks=24_500,
                 )
             )
         await session.commit()
@@ -253,4 +255,19 @@ def test_billing_settings_uses_subscription_and_current_usage(
         "dialogs_limit": 500,
         "ai_replies_used": 3,
         "channel_limit": 1,
+        "balance_kopecks": 100_000,
+        "expenses_kopecks": 24_500,
     }
+
+
+def test_billing_settings_creates_bonus_balance_and_zero_expenses(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+
+    response = client.get("/api/v1/settings/billing", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["balance_kopecks"] == 100_000
+    assert response.json()["expenses_kopecks"] == 0

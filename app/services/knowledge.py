@@ -6,6 +6,7 @@ Vector indexing/Qdrant can be attached later without changing the HTTP contract.
 
 import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import desc, func, select
@@ -23,11 +24,16 @@ from app.schemas.knowledge import (
     KnowledgeDocumentDetailResponse,
     KnowledgeDocumentResponse,
     KnowledgeDocumentStatusResponse,
+    KnowledgeReindexResponse,
 )
 from app.services.rag.embeddings import get_embedder
 from app.services.rag.vector_store import VectorPoint, get_vector_store
 
 MAX_CHUNK_CHARS = 1200
+
+
+class KnowledgeIndexingError(RuntimeError):
+    """The SQL document exists, but its vectors could not be made searchable."""
 
 
 def split_text_into_chunks(text: str, *, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
@@ -87,13 +93,15 @@ async def create_kb_document(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     body: KnowledgeDocumentCreate,
+    *,
+    require_vector_index: bool = False,
 ) -> KnowledgeDocumentResponse:
     document = KbDocument(
         tenant_id=tenant_id,
         title=body.title.strip(),
         source_type=body.source_type,
         storage_url=None,
-        status="ready",
+        status="processing" if require_vector_index else "ready",
         version=1,
     )
     session.add(document)
@@ -103,7 +111,23 @@ async def create_kb_document(
     chunks = await _add_chunks(session, tenant_id, document, chunk_texts, body.tags)
     await session.commit()
     await session.refresh(document)
-    await _index_chunks(session=session, document=document, chunks=chunks)
+    try:
+        await _index_chunks(
+            session=session,
+            document=document,
+            chunks=chunks,
+            raise_errors=require_vector_index,
+        )
+    except Exception as exc:
+        document.status = "failed"
+        document.updated_at = datetime.now(UTC)
+        await session.commit()
+        raise KnowledgeIndexingError("Knowledge vector indexing failed") from exc
+    if require_vector_index:
+        document.status = "ready"
+        document.updated_at = datetime.now(UTC)
+        await session.commit()
+        await session.refresh(document)
     return _document_response(document, len(chunk_texts))
 
 
@@ -296,6 +320,40 @@ async def reindex_ready_documents(
             document_id=document_id,
         )
     return len(rows), chunks
+
+
+async def reindex_tenant_knowledge(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+) -> KnowledgeReindexResponse:
+    """Rebuild every ready document in the tenant and expose the real completion time."""
+    documents_count, chunks_count = await reindex_ready_documents(
+        session,
+        tenant_id=tenant_id,
+    )
+    completed_at = datetime.now(UTC) if documents_count else None
+    if completed_at is not None:
+        documents = list(
+            (
+                await session.execute(
+                    select(KbDocument).where(
+                        KbDocument.tenant_id == tenant_id,
+                        KbDocument.status == "ready",
+                    )
+                )
+            ).scalars()
+        )
+        for document in documents:
+            document.updated_at = completed_at
+        await session.commit()
+    return KnowledgeReindexResponse(
+        documents_count=documents_count,
+        chunks_count=chunks_count,
+        updated_at=completed_at,
+    )
+
+
 
 
 async def _index_chunks(

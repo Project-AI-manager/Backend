@@ -77,6 +77,7 @@ def extract_knowledge_file(
     """Validate one upload and extract bounded plain text from it."""
     safe_name = Path(filename or "").name
     extension = Path(safe_name).suffix.lower()
+    is_xlsx = extension == ".xlsx"
     if extension not in SUPPORTED_EXTENSIONS:
         supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
         raise KnowledgeFileError(
@@ -84,18 +85,30 @@ def extract_knowledge_file(
             status_code=415,
         )
     if not data:
-        raise KnowledgeFileError("Uploaded file is empty")
+        message = "Загруженный файл XLSX пуст" if is_xlsx else "Uploaded file is empty"
+        raise KnowledgeFileError(message)
     if len(data) > MAX_UPLOAD_BYTES:
+        max_upload_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+        message = (
+            f"Размер файла XLSX превышает лимит {max_upload_mb} МБ"
+            if is_xlsx
+            else f"Uploaded file exceeds the {max_upload_mb} MB limit"
+        )
         raise KnowledgeFileError(
-            f"Uploaded file exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
+            message,
             status_code=413,
         )
 
     normalized_content_type = (content_type or "application/octet-stream").split(";", 1)[0]
     normalized_content_type = normalized_content_type.strip().lower()
     if normalized_content_type not in _CONTENT_TYPES[extension]:
+        message = (
+            "Тип содержимого не соответствует файлу XLSX"
+            if is_xlsx
+            else f"Content type '{normalized_content_type}' does not match {extension}"
+        )
         raise KnowledgeFileError(
-            f"Content type '{normalized_content_type}' does not match {extension}",
+            message,
             status_code=415,
         )
 
@@ -117,18 +130,36 @@ def extract_knowledge_file(
     text = _normalize_text(text)
     if not text:
         hint = " OCR is not supported for scanned/image-only files." if extension == ".pdf" else ""
-        raise KnowledgeFileError(f"No extractable text was found.{hint}")
+        message = (
+            "В файле XLSX не найден текст" if is_xlsx else f"No extractable text was found.{hint}"
+        )
+        raise KnowledgeFileError(message)
     if len(text) > MAX_EXTRACTED_CHARS:
+        message = (
+            f"Объём извлечённого текста из XLSX превышает лимит {MAX_EXTRACTED_CHARS:,} символов"
+            if is_xlsx
+            else f"Extracted text exceeds the {MAX_EXTRACTED_CHARS:,} character limit"
+        )
         raise KnowledgeFileError(
-            f"Extracted text exceeds the {MAX_EXTRACTED_CHARS:,} character limit",
+            message,
             status_code=413,
         )
 
     resolved_title = (title or Path(safe_name).stem).strip()
     if not resolved_title:
-        raise KnowledgeFileError("Document title cannot be empty")
+        message = (
+            "Название документа XLSX не может быть пустым"
+            if is_xlsx
+            else "Document title cannot be empty"
+        )
+        raise KnowledgeFileError(message)
     if len(resolved_title) > 512:
-        raise KnowledgeFileError("Document title exceeds 512 characters")
+        message = (
+            "Название документа XLSX не может быть длиннее 512 символов"
+            if is_xlsx
+            else "Document title exceeds 512 characters"
+        )
+        raise KnowledgeFileError(message)
     return ExtractedKnowledgeFile(
         title=resolved_title,
         text=text,
@@ -191,31 +222,46 @@ def _extract_pdf(stream: BinaryIO) -> str:
 
 
 def _validate_ooxml(stream: BinaryIO, *, expected_member: str, label: str) -> None:
+    is_xlsx = label == "XLSX"
     try:
         with zipfile.ZipFile(stream) as archive:
             members = archive.infolist()
             if len(members) > MAX_ZIP_ENTRIES:
-                raise KnowledgeFileError(
-                    f"{label} contains too many archive entries", status_code=413
+                message = (
+                    "Файл XLSX содержит слишком много элементов архива"
+                    if is_xlsx
+                    else f"{label} contains too many archive entries"
                 )
+                raise KnowledgeFileError(message, status_code=413)
             unpacked_size = sum(member.file_size for member in members)
             if unpacked_size > MAX_ZIP_UNCOMPRESSED_BYTES:
                 max_unpacked_mb = MAX_ZIP_UNCOMPRESSED_BYTES // (1024 * 1024)
+                message = (
+                    f"Размер распакованного файла XLSX превышает лимит {max_unpacked_mb} МБ"
+                    if is_xlsx
+                    else f"{label} expands beyond the {max_unpacked_mb} MB limit"
+                )
                 raise KnowledgeFileError(
-                    f"{label} expands beyond the {max_unpacked_mb} MB limit",
+                    message,
                     status_code=413,
                 )
             names = {member.filename for member in members}
             if "[Content_Types].xml" not in names or expected_member not in names:
-                raise KnowledgeFileError(
-                    f"The uploaded file is not a valid {label}", status_code=415
+                message = (
+                    "Загруженный файл не является корректным XLSX"
+                    if is_xlsx
+                    else f"The uploaded file is not a valid {label}"
                 )
+                raise KnowledgeFileError(message, status_code=415)
     except KnowledgeFileError:
         raise
     except (zipfile.BadZipFile, OSError) as exc:
-        raise KnowledgeFileError(
-            f"The uploaded file is not a valid {label}", status_code=415
-        ) from exc
+        message = (
+            "Загруженный файл не является корректным XLSX"
+            if is_xlsx
+            else f"The uploaded file is not a valid {label}"
+        )
+        raise KnowledgeFileError(message, status_code=415) from exc
 
 
 def _extract_docx(stream: BinaryIO) -> str:
@@ -239,22 +285,35 @@ def _extract_xlsx(stream: BinaryIO) -> str:
         workbook = load_workbook(stream, read_only=True, data_only=False, keep_links=False)
         if len(workbook.worksheets) > MAX_XLSX_SHEETS:
             raise KnowledgeFileError(
-                f"XLSX exceeds the {MAX_XLSX_SHEETS} sheet limit",
+                f"В файле XLSX больше {MAX_XLSX_SHEETS} листов",
                 status_code=413,
             )
         parts: list[str] = []
         rows_seen = 0
         cells_seen = 0
         for sheet in workbook.worksheets:
-            if sheet.max_row > MAX_XLSX_ROWS or sheet.max_row * sheet.max_column > MAX_XLSX_CELLS:
-                raise KnowledgeFileError("XLSX contains too many rows or cells", status_code=413)
+            max_row = sheet.max_row
+            max_column = sheet.max_column
+            # Some valid producers omit the optional worksheet dimension.
+            # openpyxl then reports unknown bounds in read-only mode but can
+            # still iterate safely; the counters below enforce the same limits.
+            if (
+                max_row is not None
+                and max_column is not None
+                and (max_row > MAX_XLSX_ROWS or max_row * max_column > MAX_XLSX_CELLS)
+            ):
+                raise KnowledgeFileError(
+                    "Файл XLSX содержит слишком много строк или ячеек",
+                    status_code=413,
+                )
             sheet_rows: list[str] = []
             for row in sheet.iter_rows(values_only=True):
                 rows_seen += 1
                 cells_seen += len(row)
                 if rows_seen > MAX_XLSX_ROWS or cells_seen > MAX_XLSX_CELLS:
                     raise KnowledgeFileError(
-                        "XLSX contains too many rows or cells", status_code=413
+                        "Файл XLSX содержит слишком много строк или ячеек",
+                        status_code=413,
                     )
                 values = ["" if value is None else str(value).strip() for value in row]
                 while values and not values[-1]:
@@ -264,21 +323,28 @@ def _extract_xlsx(stream: BinaryIO) -> str:
             if sheet_rows:
                 parts.append(f"Лист: {sheet.title}\n" + "\n".join(sheet_rows))
         workbook.close()
-        return _join_bounded(parts)
+        return _join_bounded(
+            parts,
+            limit_message=(
+                f"Объём извлечённого текста из XLSX превышает лимит "
+                f"{MAX_EXTRACTED_CHARS:,} символов"
+            ),
+        )
     except KnowledgeFileError:
         raise
     except Exception as exc:
-        raise KnowledgeFileError("The XLSX file could not be read") from exc
+        raise KnowledgeFileError("Не удалось прочитать файл XLSX") from exc
 
 
-def _join_bounded(parts: list[str]) -> str:
+def _join_bounded(parts: list[str], *, limit_message: str | None = None) -> str:
     result: list[str] = []
     chars = 0
     for part in parts:
         chars += len(part) + 2
         if chars > MAX_EXTRACTED_CHARS:
             raise KnowledgeFileError(
-                f"Extracted text exceeds the {MAX_EXTRACTED_CHARS:,} character limit",
+                limit_message
+                or f"Extracted text exceeds the {MAX_EXTRACTED_CHARS:,} character limit",
                 status_code=413,
             )
         result.append(part)

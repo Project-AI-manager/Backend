@@ -1,4 +1,5 @@
 """Эскалации, тарифы и учёт. См. confidence-and-escalation, saas-business-model."""
+
 import uuid
 
 from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint
@@ -36,6 +37,14 @@ class Subscription(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), default="trial")
 
 
+class BillingAccount(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "billing_account"
+    __table_args__ = (UniqueConstraint("tenant_id", name="uq_billing_account_tenant"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
+    balance_kopecks: Mapped[int] = mapped_column(Integer, default=100_000)
+
+
 class UsageCounter(Base, UUIDMixin):
     __tablename__ = "usage_counter"
     __table_args__ = (
@@ -46,3 +55,4 @@ class UsageCounter(Base, UUIDMixin):
     period: Mapped[str] = mapped_column(String(7))  # YYYY-MM
     dialogs_count: Mapped[int] = mapped_column(Integer, default=0)
     ai_replies_count: Mapped[int] = mapped_column(Integer, default=0)
+    expenses_kopecks: Mapped[int] = mapped_column(Integer, default=0)

@@ -47,3 +47,5 @@ class BillingSettingsResponse(BaseModel):
     dialogs_limit: int
     ai_replies_used: int
     channel_limit: int
+    balance_kopecks: int
+    expenses_kopecks: int

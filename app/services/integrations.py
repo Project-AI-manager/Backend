@@ -218,7 +218,11 @@ def probe_email() -> IntegrationProbeResponse:
             details={
                 "dev_mode": settings.EMAIL_DEV_MODE,
                 "from_email": settings.EMAIL_FROM,
-                "smtp_configured": bool(settings.SMTP_HOST),
+                "smtp_configured": bool(
+                    settings.SMTP_HOST
+                    and settings.SMTP_USERNAME
+                    and settings.SMTP_PASSWORD
+                ),
             },
         )
     if not settings.SMTP_HOST:
@@ -236,6 +240,8 @@ def probe_email() -> IntegrationProbeResponse:
             "host": settings.SMTP_HOST,
             "port": settings.SMTP_PORT,
             "from_email": settings.EMAIL_FROM,
+            "use_tls": settings.SMTP_USE_TLS,
+            "use_ssl": settings.SMTP_USE_SSL,
         },
     )
 

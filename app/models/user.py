@@ -1,8 +1,9 @@
 """Сотрудник тенанта и refresh-токены. Роли: owner|admin|manager."""
+
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDMixin
@@ -20,6 +21,14 @@ class User(Base, UUIDMixin, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+
+
+class UserNotificationSettings(Base, TimestampMixin):
+    __tablename__ = "user_notification_settings"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("user.id"), primary_key=True)
+    escalation_email_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    daily_digest_email_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RefreshToken(Base, UUIDMixin, TimestampMixin):

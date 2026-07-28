@@ -46,6 +46,12 @@ class KnowledgeDocumentStatusResponse(BaseModel):
     document: KnowledgeDocumentResponse
 
 
+class KnowledgeReindexResponse(BaseModel):
+    documents_count: int
+    chunks_count: int
+    updated_at: datetime | None
+
+
 class KnowledgeCandidateResponse(BaseModel):
     id: UUID
     conversation_id: UUID

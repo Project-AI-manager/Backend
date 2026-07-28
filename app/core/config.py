@@ -3,6 +3,8 @@
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.public_urls import public_url_display, public_url_href, validate_public_url
+
 _INSECURE_SECRET_KEYS = {
     "",
     "change-me",
@@ -62,7 +64,9 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
     EMAIL_TOKEN_TTL_MIN: int = 60
+    APP_PUBLIC_URL: str = "http://localhost:3000"
 
     ACCESS_TOKEN_TTL_MIN: int = 30
     REFRESH_TOKEN_TTL_DAYS: int = 30
@@ -80,11 +84,39 @@ class Settings(BaseSettings):
         """The secretless Telegram route can never be enabled outside local/test."""
         return self.is_local_or_test and self.TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK
 
+    @property
+    def app_public_href(self) -> str:
+        """Protocol-safe public URL (IDN hostname encoded as ASCII/Punycode)."""
+        return public_url_href(self.APP_PUBLIC_URL).rstrip("/")
+
+    @property
+    def app_public_display_url(self) -> str:
+        """Human-readable public URL (IDN hostname decoded to Unicode)."""
+        return public_url_display(self.APP_PUBLIC_URL).rstrip("/")
+
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
         """Fail fast instead of starting a remotely exposed app with unsafe defaults."""
+        validate_public_url(self.APP_PUBLIC_URL)
+        if self.SMTP_USE_SSL and self.SMTP_USE_TLS:
+            raise ValueError("SMTP_USE_SSL and SMTP_USE_TLS cannot both be enabled")
+        if self.EMAIL_SEND_ENABLED:
+            self._assert_smtp_delivery_configured()
         self.assert_safe_runtime()
         return self
+
+    def _assert_smtp_delivery_configured(self) -> None:
+        missing_smtp = [
+            name
+            for name, value in (
+                ("SMTP_HOST", self.SMTP_HOST),
+                ("SMTP_USERNAME", self.SMTP_USERNAME),
+                ("SMTP_PASSWORD", self.SMTP_PASSWORD),
+            )
+            if not value.strip()
+        ]
+        if missing_smtp:
+            raise ValueError("Email sending requires " + ", ".join(missing_smtp))
 
     def assert_safe_runtime(self) -> None:
         """Re-check settings after runtime mutation, mainly at application startup."""
@@ -100,8 +132,6 @@ class Settings(BaseSettings):
             raise ValueError("CORS_ORIGINS cannot contain '*' outside local/test")
         if self.EMAIL_DEV_MODE:
             raise ValueError("EMAIL_DEV_MODE must be false outside local/test")
-        if self.EMAIL_SEND_ENABLED and not self.SMTP_HOST.strip():
-            raise ValueError("SMTP_HOST is required when EMAIL_SEND_ENABLED=true")
         if self.DATABASE_URL.strip().lower().startswith("sqlite"):
             raise ValueError("SQLite DATABASE_URL is only supported in local/test")
 

@@ -45,7 +45,58 @@ def test_local_defaults_remain_available_for_development() -> None:
     assert local.allow_insecure_telegram_webhook is True
 
 
+@pytest.mark.parametrize(
+    ("configured", "href", "display"),
+    [
+        (
+            "https://автопилот.space/",
+            "https://xn--80aesmncewf.space",
+            "https://автопилот.space",
+        ),
+        (
+            "https://xn--80aesmncewf.space/",
+            "https://xn--80aesmncewf.space",
+            "https://автопилот.space",
+        ),
+    ],
+)
+def test_public_idn_has_separate_protocol_and_display_forms(
+    configured: str,
+    href: str,
+    display: str,
+) -> None:
+    configured_settings = Settings(_env_file=None, APP_PUBLIC_URL=configured)
+
+    assert configured_settings.app_public_href == href
+    assert configured_settings.app_public_display_url == display
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["автопилот.space", "javascript:alert(1)", "https://user:pass@example.com"],
+)
+def test_rejects_unsafe_public_url(url: str) -> None:
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        Settings(_env_file=None, APP_PUBLIC_URL=url)
+
+
 def test_production_can_never_enable_secretless_webhook() -> None:
     production = production_settings(TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK=True)
 
     assert production.allow_insecure_telegram_webhook is False
+
+
+def test_rejects_enabling_smtp_ssl_and_starttls_together() -> None:
+    with pytest.raises(ValidationError, match="SMTP_USE_SSL and SMTP_USE_TLS"):
+        Settings(_env_file=None, SMTP_USE_SSL=True, SMTP_USE_TLS=True)
+
+
+def test_email_delivery_requires_smtp_credentials() -> None:
+    with pytest.raises(ValidationError, match="SMTP_PASSWORD"):
+        Settings(
+            _env_file=None,
+            EMAIL_SEND_ENABLED=True,
+            SMTP_HOST="smtp.yandex.ru",
+            SMTP_USERNAME="autopilot.space",
+            SMTP_PASSWORD="",
+        )

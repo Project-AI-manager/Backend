@@ -19,6 +19,7 @@ from app.schemas.conversations import (
 )
 from app.services.channels.telegram import send_telegram_message
 from app.services.channels.telegram_mtproto import send_mtproto_message
+from app.services.escalation_notifications import notify_escalation_if_due
 
 
 async def list_conversations(
@@ -67,6 +68,25 @@ async def get_conversation_thread(
         **base.model_dump(),
         messages=[_message_response(message) for message in messages_result.scalars().all()],
     )
+
+
+async def mark_conversation_read(
+    session: AsyncSession,
+    tenant_id: UUID,
+    conversation_id: UUID,
+) -> ConversationThreadResponse:
+    result = await session.execute(
+        select(Conversation)
+        .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    conversation = result.scalar_one_or_none()
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+
+    conversation.unread_count = 0
+    await session.commit()
+    return await get_conversation_thread(session, tenant_id, conversation_id)
 
 
 async def reply_to_conversation(
@@ -155,9 +175,19 @@ async def escalate_conversation(
         tenant_id,
         conversation_id,
     )
+    was_escalated = conversation.status == "escalated"
     conversation.status = "escalated"
     conversation.assignee_user_id = user_id
     conversation.last_message_at = conversation.last_message_at or datetime.now(UTC)
+
+    if not was_escalated:
+        latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
+        message_preview = (
+            latest_inbound.text
+            if latest_inbound and latest_inbound.text.strip()
+            else conversation.last_message_preview
+        )
+        await notify_escalation_if_due(session, conversation, message_preview)
 
     await session.commit()
     thread = await get_conversation_thread(session, tenant_id, conversation.id)
