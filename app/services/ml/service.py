@@ -1,10 +1,20 @@
 """ML message service: API/worker friendly orchestration entrypoint."""
 
+import re
+
 from app.services.confidence import compute_confidence, should_auto_reply
 from app.services.ml.contracts import Decision, MemorySnippet, MLAnswerInput, MLAnswerResult
 from app.services.ml.memory import KeywordMemoryRetriever, MemoryRetriever
 from app.services.ml.prompts import build_prompt
 from app.services.rag.llm import LLMProvider, get_llm
+
+_SOCIAL_MESSAGE_RE = re.compile(
+    r"^(?:"
+    r"привет(?:ствую)?|здравствуй(?:те)?|доброе утро|добрый день|добрый вечер|"
+    r"hello|hi|hey"
+    r")[!,.\s]*$",
+    re.IGNORECASE,
+)
 
 
 class MLMessageService:
@@ -25,6 +35,7 @@ class MLMessageService:
             tenant_id=request.tenant_id,
             query=request.message,
         )
+        social_message = self._is_social_message(request.message)
         prompt = build_prompt(
             message=request.message,
             profile=request.profile,
@@ -32,22 +43,28 @@ class MLMessageService:
             history=history,
             custom_system_prompt=request.custom_system_prompt,
         )
-        answer_text = await self.llm.generate(
+        generation = await self.llm.generate_with_usage(
             prompt.user_prompt,
             [snippet.text for snippet in memory],
             system_prompt=prompt.system_prompt,
             history=[f"{turn.role}: {turn.text}" for turn in history],
         )
+        answer_text = self._normalize_answer_style(generation.text)
         confidence = self._confidence(memory=memory, answer_text=answer_text)
         can_auto_reply = (
             request.auto_reply_enabled
-            and bool(memory)
             and bool(answer_text.strip())
-            and confidence > 0
-            and not self._requires_manager(memory)
-            and should_auto_reply(
-                confidence,
-                request.confidence_threshold,
+            and (
+                social_message
+                or (
+                    bool(memory)
+                    and confidence > 0
+                    and not self._requires_manager(memory)
+                    and self._passes_confidence_setting(
+                        confidence=confidence,
+                        threshold=request.confidence_threshold,
+                    )
+                )
             )
         )
         decision: Decision = "auto_reply" if can_auto_reply else "escalate"
@@ -58,6 +75,9 @@ class MLMessageService:
             sources=tuple(memory),
             provider=self.llm.provider_name,
             prompt=prompt,
+            model=generation.model,
+            request_id=generation.request_id,
+            usage=generation.usage,
         )
 
     @staticmethod
@@ -78,3 +98,38 @@ class MLMessageService:
         return any(
             snippet.tags.get("risk", "").casefold() in {"manager", "escalate"} for snippet in memory
         )
+
+    @staticmethod
+    def _passes_confidence_setting(*, confidence: float, threshold: int) -> bool:
+        """Treat the UI percentage as the desired auto-reply share.
+
+        A value of 100 means “reply whenever grounded knowledge exists”, while
+        0 means “always hand off”. Internally this is the inverse of the
+        minimum confidence accepted by ``should_auto_reply``.
+        """
+        minimum_confidence = 100 - max(0, min(100, threshold))
+        return should_auto_reply(confidence, minimum_confidence)
+
+    @staticmethod
+    def _is_social_message(message: str) -> bool:
+        """Allow a harmless greeting without inventing company facts.
+
+        Knowledge grounding remains mandatory for factual answers. A standalone
+        greeting is the one safe exception: escalating every ``привет`` makes a
+        healthy assistant look unavailable and creates needless manager alerts.
+        """
+        return bool(_SOCIAL_MESSAGE_RE.fullmatch(message.strip()))
+
+    @staticmethod
+    def _normalize_answer_style(answer: str) -> str:
+        """Keep model punctuation aligned with the conversational style contract."""
+        def replace_dash(match: re.Match[str]) -> str:
+            prefix = match.string[: match.start()]
+            phrase = re.split(r"[.!?\n]", prefix)[-1].strip()
+            words = phrase.split()
+            separator = ": " if 0 < len(words) <= 3 and "," not in phrase else ", "
+            return separator
+
+        normalized = re.sub(r"\s*[—–]\s*", replace_dash, answer)
+        normalized = re.sub(r",\s*([,.!?;:])", r"\1", normalized)
+        return normalized.strip()

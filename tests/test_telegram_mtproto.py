@@ -339,6 +339,118 @@ def test_existing_customer_avatar_backfill_is_tenant_scoped(
     assert Path(stored[0]).read_bytes() == jpeg
 
 
+def test_mtproto_ingest_waits_after_persisting_before_ai_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    events: list[str] = []
+
+    class FakeSession:
+        def add(self, _value: object) -> None:
+            events.append("added")
+
+        async def execute(self, _query: object) -> object:
+            class Result:
+                @staticmethod
+                def scalar_one_or_none() -> None:
+                    return None
+
+            return Result()
+
+        async def flush(self) -> None:
+            pass
+
+        async def commit(self) -> None:
+            events.append("committed")
+
+    async def fake_customer(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def fake_conversation(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def fake_sleep(delay: float) -> None:
+        events.append(f"sleep:{delay}")
+
+    async def fake_process(_session: object, _message_id: object) -> None:
+        events.append("processed")
+
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_customer", fake_customer)
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_conversation", fake_conversation)
+    monkeypatch.setattr(telegram_mtproto.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(telegram_mtproto, "process_telegram_inbound_message", fake_process)
+    channel = SimpleNamespace(id=uuid.uuid4(), tenant_id=TENANT_ID)
+    inbound = SimpleNamespace(
+        peer_id=7001,
+        peer_access_hash=None,
+        sender_id=7001,
+        message_id=42,
+        text="Вопрос",
+        sender_name="Клиент",
+        avatar_bytes=None,
+        avatar_checked=False,
+    )
+
+    asyncio.run(
+        telegram_mtproto.ingest_mtproto_message(
+            FakeSession(),  # type: ignore[arg-type]
+            channel,  # type: ignore[arg-type]
+            inbound,  # type: ignore[arg-type]
+            auto_reply_delay_sec=5,
+        )
+    )
+
+    assert events[-3:] == ["committed", "sleep:5", "processed"]
+
+
+def test_listener_acknowledges_read_then_types_until_processing_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.workers import telegram_listener
+
+    events: list[str] = []
+
+    class TypingAction:
+        async def __aenter__(self) -> None:
+            events.append("typing:start")
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("typing:stop")
+
+    class FakeClient:
+        async def send_read_acknowledge(self, *_args: object, **_kwargs: object) -> None:
+            events.append("read")
+
+        def action(self, _chat: object, action: str) -> TypingAction:
+            assert action == "typing"
+            return TypingAction()
+
+    class FakeEvent:
+        raw_text = "Вопрос клиента"
+        is_channel = False
+        is_group = False
+        id = 42
+
+        async def get_input_chat(self) -> str:
+            return "chat"
+
+    async def fake_ingest(*_args: object) -> None:
+        events.append("processed")
+
+    monkeypatch.setattr(telegram_listener, "_ingest_event", fake_ingest)
+
+    asyncio.run(
+        telegram_listener._handle_incoming_message(
+            SimpleNamespace(id=uuid.uuid4()),  # type: ignore[arg-type]
+            FakeClient(),  # type: ignore[arg-type]
+            FakeEvent(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert events == ["read", "typing:start", "processed", "typing:stop"]
+
+
 def test_mtproto_read_receipt_marks_sent_outbound_messages_read(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -79,6 +79,50 @@ async def test_ml_service_answers_with_memory_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hundred_percent_auto_reply_setting_accepts_low_confidence_grounding() -> None:
+    weak_memory = MemorySnippet(
+        id="delivery",
+        title="Доставка",
+        text="Доставка по Москве стоит 490 рублей.",
+        score=0.2,
+        source="test",
+        tags={"topic": "delivery"},
+    )
+    service = MLMessageService(llm=CapturingLLM(answer="Доставка стоит 490 рублей."))
+
+    result = await service.answer(
+        MLAnswerInput(
+            tenant_id=TENANT_ID,
+            message="Сколько стоит доставка?",
+            auto_reply_enabled=True,
+            confidence_threshold=100,
+            memory_override=(weak_memory,),
+        )
+    )
+
+    assert result.confidence > 0
+    assert result.decision == "auto_reply"
+
+
+@pytest.mark.asyncio
+async def test_zero_percent_auto_reply_setting_escalates_even_with_strong_grounding() -> None:
+    service = MLMessageService(llm=CapturingLLM())
+
+    result = await service.answer(
+        MLAnswerInput(
+            tenant_id=TENANT_ID,
+            message="Сколько занимает подключение?",
+            auto_reply_enabled=True,
+            confidence_threshold=0,
+            memory_override=(memory_snippet(),),
+        )
+    )
+
+    assert result.confidence > 0
+    assert result.decision == "escalate"
+
+
+@pytest.mark.asyncio
 async def test_ml_service_escalates_without_context_even_at_zero_threshold() -> None:
     service = MLMessageService(
         retriever=KeywordMemoryRetriever(snippets=[]),
@@ -98,6 +142,48 @@ async def test_ml_service_escalates_without_context_even_at_zero_threshold() -> 
     assert result.sources == ()
     assert result.decision == "escalate"
     assert "менеджер" in result.answer.lower()
+
+
+@pytest.mark.asyncio
+async def test_ml_service_auto_replies_to_standalone_greeting_without_context() -> None:
+    service = MLMessageService(
+        retriever=KeywordMemoryRetriever(snippets=[]),
+        llm=CapturingLLM(answer="Здравствуйте! Чем могу помочь?"),
+    )
+
+    result = await service.answer(
+        MLAnswerInput(
+            tenant_id=TENANT_ID,
+            message="Привет!",
+            auto_reply_enabled=True,
+            confidence_threshold=80,
+        )
+    )
+
+    assert result.sources == ()
+    assert result.confidence == 0
+    assert result.decision == "auto_reply"
+    assert result.answer == "Здравствуйте! Чем могу помочь?"
+
+
+@pytest.mark.asyncio
+async def test_ml_service_does_not_treat_factual_question_as_social_message() -> None:
+    service = MLMessageService(
+        retriever=KeywordMemoryRetriever(snippets=[]),
+        llm=CapturingLLM(answer="Ответ без опоры на базу"),
+    )
+
+    result = await service.answer(
+        MLAnswerInput(
+            tenant_id=TENANT_ID,
+            message="Привет, сколько стоит кровать?",
+            auto_reply_enabled=True,
+            confidence_threshold=0,
+        )
+    )
+
+    assert result.sources == ()
+    assert result.decision == "escalate"
 
 
 @pytest.mark.asyncio
@@ -157,6 +243,30 @@ async def test_ml_service_passes_all_history_turns() -> None:
     assert "Сообщение 0" in result.prompt.user_prompt
     assert "Сообщение 2" in result.prompt.user_prompt
     assert "Не придумывай факты." in llm.system_prompt
+    assert "учти всю историю диалога" in llm.system_prompt
+    assert "1–3 коротких предложения" in llm.system_prompt
+    assert "без длинного тире" in llm.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_ml_service_removes_long_dashes_from_generated_answer() -> None:
+    service = MLMessageService(
+        llm=CapturingLLM(answer="Да — подключить Telegram можно. Срок – один день."),
+    )
+
+    result = await service.answer(
+        MLAnswerInput(
+            tenant_id=TENANT_ID,
+            message="Можно подключить Telegram?",
+            auto_reply_enabled=True,
+            confidence_threshold=100,
+            memory_override=(memory_snippet(),),
+        )
+    )
+
+    assert result.answer == "Да: подключить Telegram можно. Срок: один день."
+    assert "—" not in result.answer
+    assert "–" not in result.answer
 
 
 @pytest.mark.asyncio
@@ -312,6 +422,121 @@ async def test_openai_compatible_provider_accepts_sse_response(
     answer = await provider.generate("Question", [])
 
     assert answer == "Answer ready"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_reads_omnirouter_sse_trailers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> httpx.Response:
+            body = "\n".join(
+                [
+                    'data: {"id":"gen-stream","model":"alias",'
+                    '"choices":[{"delta":{"content":"Готово"}}]}',
+                    'data: {"choices":[],"usage":{"prompt_tokens":2023,'
+                    '"completion_tokens":58,"total_tokens":2081}}',
+                    ": x-omniroute-response-cost=0.0009275",
+                    ": x-omniroute-model=gpt-5.6-terra",
+                    "data: [DONE]",
+                ]
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                request=httpx.Request("POST", url),
+                content=body.encode(),
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:20128/v1",
+        api_key="runtime-key",
+        model="cx/gpt-5.6-terra-low",
+        timeout_sec=12.0,
+    )
+
+    generation = await provider.generate_with_usage("Вопрос", [])
+
+    assert generation.text == "Готово"
+    assert generation.model == "gpt-5.6-terra"
+    assert generation.request_id == "gen-stream"
+    assert generation.usage.input_tokens == 2023
+    assert generation.usage.output_tokens == 58
+    assert generation.usage.total_tokens == 2081
+    assert generation.usage.provider_cost_usd == pytest.approx(0.0009275)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_extracts_usage_without_double_counting_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={
+                    "id": "gen-1",
+                    "model": "gpt-5.6-terra",
+                    "choices": [{"message": {"content": "Готово"}}],
+                    "usage": {
+                        "prompt_tokens": 4000,
+                        "completion_tokens": 750,
+                        "total_tokens": 4750,
+                        "prompt_tokens_details": {"cached_tokens": 1000},
+                        "completion_tokens_details": {"reasoning_tokens": 600},
+                    },
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:20128/v1",
+        api_key="runtime-key",
+        model="cx/gpt-5.6-terra-low",
+        timeout_sec=12.0,
+    )
+
+    generation = await provider.generate_with_usage("Вопрос", [])
+
+    assert generation.text == "Готово"
+    assert generation.model == "gpt-5.6-terra"
+    assert generation.usage.input_tokens == 4000
+    assert generation.usage.cached_input_tokens == 1000
+    assert generation.usage.output_tokens == 750
+    assert generation.usage.reasoning_tokens == 600
+    assert generation.usage.total_tokens == 4750
 
 
 @pytest.mark.asyncio

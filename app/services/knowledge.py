@@ -126,7 +126,7 @@ async def create_kb_document(
         document.status = "failed"
         document.updated_at = datetime.now(UTC)
         await session.commit()
-        raise KnowledgeIndexingError("Knowledge vector indexing failed") from exc
+        raise _knowledge_indexing_error(exc) from exc
     if require_vector_index:
         document.status = "ready"
         document.updated_at = datetime.now(UTC)
@@ -157,7 +157,16 @@ async def archive_kb_document(
     document_id: uuid.UUID,
 ) -> KnowledgeDocumentStatusResponse:
     document = await _get_document(session, tenant_id, document_id)
-    vector_store = get_vector_store()
+    try:
+        vector_store = get_vector_store()
+    except Exception as exc:  # noqa: BLE001 - archive must not depend on vector infra.
+        vector_store = None
+        log.warning(
+            "knowledge_vector_delete_failed",
+            error=str(exc),
+            tenant_id=str(tenant_id),
+            document_id=str(document.id),
+        )
     if vector_store is not None:
         try:
             await vector_store.delete_document(tenant_id=tenant_id, document_id=document.id)
@@ -284,7 +293,7 @@ async def index_kb_document(
 ) -> int:
     """Replace one document's Qdrant points using the configured embedding contract."""
     document = await _get_document(session, tenant_id, document_id)
-    if document.status != "ready":
+    if document.status not in {"ready", "failed"}:
         return 0
     result = await session.execute(
         select(KbChunk)
@@ -292,7 +301,10 @@ async def index_kb_document(
         .order_by(KbChunk.position)
     )
     chunks = list(result.scalars().all())
-    vector_store = get_vector_store()
+    try:
+        vector_store = get_vector_store()
+    except Exception as exc:
+        raise _knowledge_indexing_error(exc) from exc
     if vector_store is None:
         raise KnowledgeIndexingError(
             "Векторное хранилище отключено на сервере",
@@ -309,13 +321,23 @@ async def index_kb_document(
         )
     except Exception as exc:
         raise _knowledge_indexing_error(exc) from exc
+    if document.status == "failed":
+        document.status = "ready"
+        document.updated_at = datetime.now(UTC)
+        await session.commit()
     return len(chunks)
 
 
 def _knowledge_indexing_error(exc: Exception) -> KnowledgeIndexingError:
     """Translate infrastructure/provider failures into a safe Russian API error."""
     message = str(exc).lower()
-    if "connection" in message or "connect" in message:
+    if (
+        "connection" in message
+        or "connect" in message
+        or "already accessed" in message
+        or "alreadylocked" in message
+        or "permission denied" in message
+    ):
         return KnowledgeIndexingError(
             "Сервис векторной базы временно недоступен",
             code="vector_store_unavailable",
@@ -342,7 +364,9 @@ async def reindex_ready_documents(
     tenant_id: uuid.UUID | None = None,
 ) -> tuple[int, int]:
     """Reindex ready knowledge documents; return ``(documents, chunks)``."""
-    query = select(KbDocument.id, KbDocument.tenant_id).where(KbDocument.status == "ready")
+    query = select(KbDocument.id, KbDocument.tenant_id).where(
+        KbDocument.status.in_(("ready", "failed"))
+    )
     if tenant_id is not None:
         query = query.where(KbDocument.tenant_id == tenant_id)
     rows = (await session.execute(query.order_by(KbDocument.created_at))).all()
@@ -373,12 +397,13 @@ async def reindex_tenant_knowledge(
                 await session.execute(
                     select(KbDocument).where(
                         KbDocument.tenant_id == tenant_id,
-                        KbDocument.status == "ready",
+                        KbDocument.status.in_(("ready", "failed")),
                     )
                 )
             ).scalars()
         )
         for document in documents:
+            document.status = "ready"
             document.updated_at = completed_at
         await session.commit()
     return KnowledgeReindexResponse(
@@ -397,11 +422,10 @@ async def _index_chunks(
     chunks: Sequence[KbChunk],
     raise_errors: bool = False,
 ) -> None:
-    vector_store = get_vector_store()
-    if vector_store is None or not chunks:
-        return
-
     try:
+        vector_store = get_vector_store()
+        if vector_store is None or not chunks:
+            return
         ai_config = await session.get(TenantAIConfig, document.tenant_id)
         embedder = get_embedder(ai_config.embedding_model if ai_config else None)
         vectors = await embedder.embed_passages(

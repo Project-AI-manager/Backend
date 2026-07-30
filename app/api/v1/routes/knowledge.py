@@ -114,10 +114,16 @@ async def upload_document_file(
             session,
             tenant_id,
             body,
-            require_vector_index=True,
         )
     except KnowledgeIndexingError as exc:
-        raise HTTPException(503, "Не удалось создать векторную базу знаний") from exc
+        raise HTTPException(
+            503,
+            {
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.get("/documents/{document_id}", response_model=KnowledgeDocumentDetailResponse)

@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, JsonDict, TimestampMixin, UUIDMixin
@@ -56,3 +56,33 @@ class UsageCounter(Base, UUIDMixin):
     dialogs_count: Mapped[int] = mapped_column(Integer, default=0)
     ai_replies_count: Mapped[int] = mapped_column(Integer, default=0)
     expenses_kopecks: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AIUsageEvent(Base, UUIDMixin, TimestampMixin):
+    """Immutable, per-generation accounting record for analytics and billing."""
+
+    __tablename__ = "ai_usage_event"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer.id"), nullable=True, index=True
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation.id"), nullable=True, index=True
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("message.id"), nullable=True, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    request_id: Mapped[str] = mapped_column(String(255), default="")
+    reasoning_effort: Mapped[str] = mapped_column(String(16), default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    provider_cost_microrubles: Mapped[int] = mapped_column(BigInteger, default=0)
+    client_charge_kopecks: Mapped[int] = mapped_column(Integer, default=0)
+    currency_rate_kopecks: Mapped[int] = mapped_column(Integer, default=9000)

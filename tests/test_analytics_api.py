@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Generator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -20,9 +20,9 @@ from app.core.security import create_token
 from app.db.session import get_session
 from app.main import app
 from app.models.channel import Channel
-from app.models.conversation import Conversation, Customer, Message
+from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
-from app.models.ops import Plan, Subscription, UsageCounter
+from app.models.ops import AIUsageEvent, Plan, Subscription, UsageCounter
 from app.models.tenant import Tenant
 from app.models.user import User
 
@@ -54,8 +54,10 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             User.__table__,
             Channel.__table__,
             Customer.__table__,
+            CustomerIdentity.__table__,
             Conversation.__table__,
             Message.__table__,
+            AIUsageEvent.__table__,
             Plan.__table__,
             Subscription.__table__,
             UsageCounter.__table__,
@@ -343,12 +345,12 @@ def test_analytics_overview_returns_tenant_kpis(
 
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["dialogs_total"] == 3
-    assert data["dialogs_open"] == 1
+    assert data["dialogs_total"] == 2
+    assert data["dialogs_open"] == 0
     assert data["dialogs_auto"] == 1
     assert data["dialogs_escalated"] == 1
-    assert data["auto_reply_rate"] == 0.3333
-    assert data["escalation_rate"] == 0.3333
+    assert data["auto_reply_rate"] == 0.5
+    assert data["escalation_rate"] == 0.5
     assert data["avg_response_sec"] == 75
     assert data["avg_ai_confidence"] == 0.8
     assert data["ai_replies_count"] == 1
@@ -362,8 +364,322 @@ def test_analytics_overview_returns_tenant_kpis(
     assert data["status_breakdown"] == [
         {"status": "auto", "count": 1},
         {"status": "escalated", "count": 1},
-        {"status": "open", "count": 1},
     ]
+
+
+def test_detailed_analytics_export_contains_customer_conversation_and_message_sheets(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    asyncio.run(seed_analytics_data(session_factory))
+
+    response = client.get("/api/v1/analytics/export", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    assert workbook.sheetnames == [
+        "Сводка",
+        "По дням",
+        "Клиенты",
+        "Диалоги",
+        "Сообщения",
+        "Использование AI",
+    ]
+    customer_names = {
+        workbook["Клиенты"].cell(row=row, column=2).value
+        for row in range(2, workbook["Клиенты"].max_row + 1)
+    }
+    assert customer_names == {"Auto customer", "Escalated customer"}
+    assert workbook["Сообщения"].max_row == 5
+    assert workbook["Сводка"]["B19"].number_format == '#,##0.00 "₽"'
+    assert workbook["Сводка"]["B3"].number_format == "yyyy-mm-dd h:mm:ss"
+
+
+def test_detailed_analytics_export_works_for_empty_period(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    async def seed_empty_tenant() -> None:
+        async with session_factory() as session:
+            session.add(Tenant(id=TENANT_ID, name="Empty", slug="empty", status="active"))
+            session.add(
+                User(
+                    id=USER_ID,
+                    tenant_id=TENANT_ID,
+                    email="owner@example.com",
+                    full_name="Owner",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed_empty_tenant())
+
+    response = client.get(
+        "/api/v1/analytics/export?from=2026-07-01&to=2026-07-01",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="autopilot-analytics-2026-07-01-2026-07-01.xlsx"'
+    )
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    assert workbook["Сводка"]["B4"].value == 0
+    assert workbook["Сводка"]["B9"].value == 0
+    assert workbook["По дням"].max_row == 3
+    assert workbook["По дням"]["A3"].value == "ИТОГО ЗА ПЕРИОД"
+    assert workbook["Клиенты"].max_row == 1
+    assert workbook["Диалоги"].max_row == 1
+    assert workbook["Сообщения"].max_row == 1
+    assert workbook["Использование AI"].max_row == 1
+
+
+def test_detailed_analytics_export_stays_available_before_usage_migration(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def remove_usage_ledger() -> None:
+        async with session_factory() as session:
+            await session.execute(text("DROP TABLE ai_usage_event"))
+            await session.commit()
+
+    asyncio.run(remove_usage_ledger())
+
+    response = client.get("/api/v1/analytics/export", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    assert workbook["Клиенты"].max_row == 3
+    assert workbook["Сообщения"].max_row == 5
+    assert workbook["Использование AI"].max_row == 1
+
+
+def test_detailed_analytics_export_works_for_one_dialog_without_usage(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    async def seed_one_dialog() -> None:
+        async with session_factory() as session:
+            session.add(Tenant(id=TENANT_ID, name="Single", slug="single", status="active"))
+            session.add(
+                User(
+                    id=USER_ID,
+                    tenant_id=TENANT_ID,
+                    email="owner@example.com",
+                    full_name="Owner",
+                    role="owner",
+                    password_hash="test-password-hash",
+                    status="active",
+                )
+            )
+            session.add(
+                Channel(
+                    id=CHANNEL_ID,
+                    tenant_id=TENANT_ID,
+                    type="telegram",
+                    name="Telegram",
+                    status="active",
+                    credentials_encrypted="fernet:test",
+                    settings={},
+                )
+            )
+            session.add(
+                Customer(
+                    id=CUSTOMER_ID,
+                    tenant_id=TENANT_ID,
+                    display_name="Один клиент",
+                    note="",
+                )
+            )
+            await session.flush()
+            conversation = Conversation(
+                tenant_id=TENANT_ID,
+                customer_id=CUSTOMER_ID,
+                channel_id=CHANNEL_ID,
+                status="answered",
+                last_message_at=datetime(2026, 7, 15, 9, 2, tzinfo=UTC),
+                last_message_preview="Ответ",
+                unread_count=0,
+            )
+            session.add(conversation)
+            await session.flush()
+            session.add_all(
+                [
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation.id,
+                        direction="inbound",
+                        sender_type="customer",
+                        text="Вопрос",
+                        attachments={},
+                        status="received",
+                        confidence=None,
+                        ai_meta={},
+                        created_at=datetime(2026, 7, 15, 9, 0, tzinfo=UTC),
+                    ),
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation.id,
+                        direction="outbound",
+                        sender_type="manager",
+                        text="Ответ",
+                        attachments={},
+                        status="sent",
+                        confidence=None,
+                        ai_meta={},
+                        created_at=datetime(2026, 7, 15, 9, 2, tzinfo=UTC),
+                    ),
+                ]
+            )
+            await session.commit()
+
+    asyncio.run(seed_one_dialog())
+
+    response = client.get(
+        "/api/v1/analytics/export?from=2026-07-15&to=2026-07-15",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    assert workbook["Клиенты"].max_row == 2
+    assert workbook["Клиенты"]["B2"].value == "Один клиент"
+    assert workbook["Клиенты"]["L2"].value == "Нет AI-ответов"
+    assert workbook["Клиенты"]["R2"].value == 0
+    assert workbook["Диалоги"].max_row == 2
+    assert workbook["Сообщения"].max_row == 3
+    assert workbook["Сообщения"]["T2"].value is None
+    assert workbook["Сообщения"]["T3"].value is None
+    assert workbook["Использование AI"].max_row == 1
+
+
+def test_detailed_analytics_export_marks_missing_historical_token_data(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    asyncio.run(seed_analytics_data(session_factory))
+
+    response = client.get("/api/v1/analytics/export", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    summary = workbook["Сводка"]
+    assert summary["B11"].value == 0
+    assert summary["B12"].value == "Нет исторических данных"
+    assert summary["B13"].value is None
+    daily = workbook["По дням"]
+    active_rows = [row for row in range(2, daily.max_row) if daily.cell(row, 5).value]
+    assert active_rows
+    active_row = active_rows[0]
+    assert daily.cell(active_row, 9).value == "Нет исторических данных"
+    assert daily.cell(active_row, 10).value is None
+    assert daily.cell(active_row, 16).value is None
+    assert daily.cell(daily.max_row, 1).value == "ИТОГО ЗА ПЕРИОД"
+    assert daily.cell(daily.max_row, 9).value == "Нет исторических данных"
+    assert daily.auto_filter.ref.endswith(str(daily.max_row - 1))
+    assert daily.freeze_panes == "B2"
+    assert daily["A1"].alignment.wrap_text is True
+    assert daily.row_dimensions[1].height == 42
+
+
+def test_detailed_analytics_export_does_not_treat_empty_usage_as_measured(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def add_empty_usage_object() -> None:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(Message).where(
+                    Message.tenant_id == TENANT_ID,
+                    Message.sender_type == "ai",
+                )
+            )
+            message = result.scalars().first()
+            assert message is not None
+            message.ai_meta = {**(message.ai_meta or {}), "usage": {}}
+            await session.commit()
+
+    asyncio.run(add_empty_usage_object())
+    response = client.get("/api/v1/analytics/export", headers=auth_headers())
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=True)
+    assert workbook["Сводка"]["B11"].value == 0
+    assert workbook["Сводка"]["B12"].value == "Нет исторических данных"
+    assert workbook["Сводка"]["B13"].value is None
+
+
+def test_detailed_analytics_export_can_omit_message_sheet(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    response = client.get(
+        "/api/v1/analytics/export?include_messages=false",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(response.content), read_only=True)
+    assert "Сообщения" not in workbook.sheetnames
+
+
+def test_detailed_analytics_export_rejects_invalid_period(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    inverted = client.get(
+        "/api/v1/analytics/export?from=2026-07-30&to=2026-07-01",
+        headers=auth_headers(),
+    )
+    too_long = client.get(
+        "/api/v1/analytics/export?from=2025-07-01&to=2026-07-30",
+        headers=auth_headers(),
+    )
+
+    assert inverted.status_code == 422
+    assert too_long.status_code == 422
 
 
 def test_analytics_counts_answered_conversation_as_open(
@@ -382,6 +698,20 @@ def test_analytics_counts_answered_conversation_as_open(
             )
             conversation = result.scalar_one()
             conversation.status = "answered"
+            session.add(
+                Message(
+                    tenant_id=TENANT_ID,
+                    conversation_id=conversation.id,
+                    direction="inbound",
+                    sender_type="customer",
+                    text="Новый вопрос",
+                    attachments={},
+                    status="received",
+                    confidence=None,
+                    ai_meta={},
+                    created_at=datetime.now(UTC),
+                )
+            )
             await session.commit()
 
     asyncio.run(mark_open_conversation_answered())
@@ -393,7 +723,7 @@ def test_analytics_counts_answered_conversation_as_open(
     assert {"status": "answered", "count": 1} in data["status_breakdown"]
 
 
-def test_analytics_filters_by_inclusive_utc_dates_and_fills_daily_zeroes(
+def test_analytics_counts_unique_active_dialogs_by_moscow_day_and_fills_zeroes(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -411,7 +741,7 @@ def test_analytics_filters_by_inclusive_utc_dates_and_fills_daily_zeroes(
                 .all()
             )
             by_status = {conversation.status: conversation for conversation in conversations}
-            by_status["open"].created_at = datetime(2026, 7, 19, 23, 59, tzinfo=UTC)
+            by_status["open"].created_at = datetime(2026, 7, 1, 23, 59, tzinfo=UTC)
             by_status["auto"].created_at = datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
             by_status["escalated"].created_at = datetime(2026, 7, 22, 0, 0, tzinfo=UTC)
 
@@ -445,6 +775,92 @@ def test_analytics_filters_by_inclusive_utc_dates_and_fills_daily_zeroes(
         {"date": "2026-07-21", "dialogs": 0},
         {"date": "2026-07-22", "dialogs": 1},
         {"date": "2026-07-23", "dialogs": 0},
+    ]
+
+
+def test_analytics_counts_reused_dialog_again_on_another_day_but_once_per_day(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_analytics_data(session_factory))
+
+    async def arrange_repeated_inbound_messages() -> None:
+        async with session_factory() as session:
+            conversation = (
+                await session.execute(
+                    select(Conversation).where(
+                        Conversation.tenant_id == TENANT_ID,
+                        Conversation.status == "auto",
+                    )
+                )
+            ).scalar_one()
+            conversation.created_at = datetime(2026, 7, 1, tzinfo=UTC)
+            existing_messages = list(
+                (
+                    await session.execute(
+                        select(Message).where(Message.tenant_id == TENANT_ID)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for message in existing_messages:
+                message.created_at = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+            session.add_all(
+                [
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation.id,
+                        direction="inbound",
+                        sender_type="customer",
+                        text="Повторный вопрос 1",
+                        attachments={},
+                        status="received",
+                        confidence=None,
+                        ai_meta={},
+                        created_at=datetime(2026, 7, 29, 22, 5, tzinfo=UTC),
+                    ),
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation.id,
+                        direction="inbound",
+                        sender_type="customer",
+                        text="Повторный вопрос 2",
+                        attachments={},
+                        status="received",
+                        confidence=None,
+                        ai_meta={},
+                        created_at=datetime(2026, 7, 29, 22, 10, tzinfo=UTC),
+                    ),
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation.id,
+                        direction="inbound",
+                        sender_type="customer",
+                        text="Вопрос на следующий день",
+                        attachments={},
+                        status="received",
+                        confidence=None,
+                        ai_meta={},
+                        created_at=datetime(2026, 7, 30, 21, 5, tzinfo=UTC),
+                    ),
+                ]
+            )
+            await session.commit()
+
+    asyncio.run(arrange_repeated_inbound_messages())
+    response = client.get(
+        "/api/v1/analytics/overview?from=2026-07-30&to=2026-07-31",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["dialogs_total"] == 1
+    assert data["inbound_messages_count"] == 3
+    assert data["daily_series"] == [
+        {"date": "2026-07-30", "dialogs": 1},
+        {"date": "2026-07-31", "dialogs": 1},
     ]
 
 
@@ -493,7 +909,7 @@ def test_analytics_auto_reply_rate_cannot_include_another_tenants_conversation(
 
     asyncio.run(add_cross_tenant_message())
 
-    today = datetime.now(UTC).date().isoformat()
+    today = datetime.now(UTC).astimezone(timezone(timedelta(hours=3))).date().isoformat()
     response = client.get(
         f"/api/v1/analytics/overview?from={today}&to={today}",
         headers=auth_headers(),
@@ -501,7 +917,7 @@ def test_analytics_auto_reply_rate_cannot_include_another_tenants_conversation(
 
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["auto_reply_rate"] == 0.3333
+    assert data["auto_reply_rate"] == 0.5
 
 
 def test_analytics_rejects_inverted_date_range(

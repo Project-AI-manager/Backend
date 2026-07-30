@@ -1,6 +1,7 @@
 """Каналы: подключение и вебхуки. Экран: /channels. См. channel-integrations."""
 
 import secrets
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -19,6 +20,9 @@ from app.schemas.channels import (
 )
 from app.services.channels.telegram import (
     connect_channel as connect_channel_service,
+)
+from app.services.channels.telegram import (
+    disconnect_channel as disconnect_channel_service,
 )
 from app.services.channels.telegram import (
     list_channels as list_channels_service,
@@ -76,6 +80,19 @@ async def connect_channel(
     session: SessionDep,
 ) -> ChannelResponse:
     return await connect_channel_service(session, tenant_id_from_user(user), body)
+
+
+@router.delete("/{channel_id}", response_model=ChannelResponse)
+async def disconnect_channel(
+    channel_id: uuid.UUID,
+    user: AdminUser,
+    session: SessionDep,
+) -> ChannelResponse:
+    return await disconnect_channel_service(
+        session,
+        tenant_id_from_user(user),
+        channel_id,
+    )
 
 
 @router.post("/webhook/{channel_type}", response_model=ChannelWebhookResponse)

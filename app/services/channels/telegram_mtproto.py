@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -51,6 +52,13 @@ class TelegramMTProtoDelivery:
     delivered: bool
     message_id: int | None = None
     read: bool = False
+
+
+async def cancel_pending_account_connection(channel_id: UUID) -> None:
+    """Close and forget an unfinished MTProto authorization flow."""
+    pending = _pending_auth.pop(channel_id, None)
+    if pending is not None:
+        await pending.client.disconnect()
 
 
 def _application_credentials() -> tuple[int, str]:
@@ -326,6 +334,8 @@ async def ingest_mtproto_message(
     session: AsyncSession,
     channel: Channel,
     inbound: TelegramMTProtoInbound,
+    *,
+    auto_reply_delay_sec: float = 0.0,
 ) -> UUID:
     normalized = NormalizedMessage(
         channel="telegram",
@@ -374,6 +384,8 @@ async def ingest_mtproto_message(
     )
     session.add(message)
     await session.commit()
+    if auto_reply_delay_sec > 0:
+        await asyncio.sleep(auto_reply_delay_sec)
     await process_telegram_inbound_message(session, message.id)
     return conversation.id
 

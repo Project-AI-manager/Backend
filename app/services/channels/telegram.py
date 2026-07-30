@@ -18,12 +18,14 @@ from app.core.logging import log
 from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
+from app.models.ops import AIUsageEvent
 from app.models.tenant import Tenant, TenantAIConfig
 from app.schemas.channels import (
     ChannelConnectRequest,
     ChannelResponse,
     ChannelWebhookResponse,
 )
+from app.services.billing.usage import calculate_usage_cost, reasoning_effort
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 from app.services.escalation_notifications import notify_escalation_if_due
 from app.services.ml.contracts import AssistantProfile, ChatRole, ChatTurn, MLAnswerInput
@@ -138,6 +140,37 @@ async def list_channels(
         select(Channel).where(Channel.tenant_id == tenant_id).order_by(Channel.created_at)
     )
     return [_channel_response(channel) for channel in result.scalars().all()]
+
+
+async def disconnect_channel(
+    session: AsyncSession,
+    tenant_id: UUID,
+    channel_id: UUID,
+) -> ChannelResponse:
+    """Disconnect a channel without destroying its conversation history.
+
+    Conversations and messages keep their channel foreign key, so a hard delete
+    would either fail or erase useful history. Clearing all authorization data
+    and disabling the row makes previously issued Telegram credentials unusable
+    by this application while keeping analytics and archived conversations.
+    """
+    channel = await session.get(Channel, channel_id)
+    if channel is None or channel.tenant_id != tenant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
+
+    if channel.type == "telegram":
+        # Imported lazily to avoid the telegram_mtproto -> telegram dependency
+        # cycle at module import time.
+        from app.services.channels.telegram_mtproto import cancel_pending_account_connection
+
+        await cancel_pending_account_connection(channel.id)
+
+    channel.status = "disabled"
+    channel.credentials_encrypted = ""
+    channel.settings = {}
+    await session.commit()
+    await session.refresh(channel)
+    return _channel_response(channel)
 
 
 async def connect_channel(
@@ -265,7 +298,13 @@ async def process_telegram_inbound_message(
             decision="auto_reply" if existing_outbound else "escalate",
         )
 
-    if conversation.status == "escalated":
+    ai_config = await session.get(TenantAIConfig, channel.tenant_id)
+    force_ai_retry = bool(
+        ai_config
+        and ai_config.auto_reply_enabled
+        and ai_config.confidence_threshold >= 100
+    )
+    if conversation.status == "escalated" and not force_ai_retry:
         inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": "escalate"}
         conversation.last_message_at = datetime.now(UTC)
         conversation.last_message_preview = inbound.text
@@ -282,7 +321,6 @@ async def process_telegram_inbound_message(
         )
 
     tenant = await session.get(Tenant, channel.tenant_id)
-    ai_config = await session.get(TenantAIConfig, channel.tenant_id)
     try:
         service = MLMessageService(
             retriever=await get_memory_retriever(session, channel.tenant_id),
@@ -349,6 +387,16 @@ async def process_telegram_inbound_message(
             confidence=answer.confidence,
             ai_meta={
                 "provider": answer.provider,
+                "model": answer.model,
+                "usage": {
+                    "input_tokens": answer.usage.input_tokens,
+                    "cached_input_tokens": answer.usage.cached_input_tokens,
+                    "cache_write_tokens": answer.usage.cache_write_tokens,
+                    "output_tokens": answer.usage.output_tokens,
+                    "reasoning_tokens": answer.usage.reasoning_tokens,
+                    "total_tokens": answer.usage.total_tokens,
+                    "provider_cost_usd": answer.usage.provider_cost_usd,
+                },
                 "sources": [source.id for source in answer.sources],
                 "delivery": "delivery-pending",
                 "chat_id": _message_chat_id(inbound),
@@ -360,6 +408,28 @@ async def process_telegram_inbound_message(
             },
         )
         session.add(outbound)
+        await session.flush()
+        usage_cost = calculate_usage_cost(answer.model, answer.usage)
+        session.add(
+            AIUsageEvent(
+                tenant_id=channel.tenant_id,
+                customer_id=conversation.customer_id,
+                conversation_id=conversation.id,
+                message_id=outbound.id,
+                provider=answer.provider,
+                model=answer.model,
+                request_id=answer.request_id,
+                reasoning_effort=reasoning_effort(answer.model),
+                input_tokens=answer.usage.input_tokens,
+                cached_input_tokens=answer.usage.cached_input_tokens,
+                cache_write_tokens=answer.usage.cache_write_tokens,
+                output_tokens=answer.usage.output_tokens,
+                reasoning_tokens=answer.usage.reasoning_tokens,
+                total_tokens=answer.usage.total_tokens,
+                provider_cost_microrubles=usage_cost.provider_cost_microrubles,
+                client_charge_kopecks=usage_cost.client_charge_kopecks,
+            )
+        )
         conversation.status = "auto"
         delivered, delivery, telegram_message_id = await _deliver_telegram_reply(
             channel,
@@ -389,7 +459,13 @@ async def process_telegram_inbound_message(
         conversation.status = "escalated"
         await notify_escalation_if_due(session, conversation, inbound.text)
 
-    inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": answer.decision}
+    inbound.ai_meta = {
+        **(inbound.ai_meta or {}),
+        "decision": answer.decision,
+        "confidence": answer.confidence,
+        "provider": answer.provider,
+        "sources": [source.id for source in answer.sources],
+    }
 
     update_id = str(inbound.external_message_id or "").partition(":")[0]
     if update_id:

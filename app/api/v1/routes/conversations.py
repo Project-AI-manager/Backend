@@ -1,10 +1,12 @@
 """Inbox conversations and messages. Screen: /inbox."""
 
+import csv
+import io
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
 from app.core.config import settings
@@ -49,6 +51,52 @@ async def get_conversation(
     session: SessionDep,
 ) -> ConversationThreadResponse:
     return await get_conversation_thread(session, tenant_id_from_user(user), conversation_id)
+
+
+@router.get("/{conversation_id}/export")
+async def export_conversation(
+    conversation_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> StreamingResponse:
+    conversation = await get_conversation_thread(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["Дата и время", "Отправитель", "Сообщение", "Вложения", "Статус"])
+    for message in conversation.messages:
+        attachment_items = message.attachments.get("items", [])
+        attachment_names = ", ".join(
+            str(item.get("name") or item.get("filename") or "Вложение")
+            for item in attachment_items
+            if isinstance(item, dict)
+        )
+        sender = (
+            "Клиент"
+            if message.direction == "inbound"
+            else "Автопилот"
+            if message.sender_type in {"ai", "assistant"}
+            else "Менеджер"
+        )
+        writer.writerow(
+            [
+                message.created_at.isoformat(),
+                sender,
+                message.text,
+                attachment_names,
+                message.status,
+            ]
+        )
+    filename = f"conversation-{conversation_id}.csv"
+    body = io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8"))
+    return StreamingResponse(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{conversation_id}/avatar", response_class=FileResponse)

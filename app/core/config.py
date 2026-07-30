@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     GIGACHAT_API_KEY: str = ""
     TELEGRAM_DELIVERY_ENABLED: bool = False
     TELEGRAM_DELIVERY_TIMEOUT_SEC: float = 8.0
+    TELEGRAM_AUTO_REPLY_DELAY_SEC: float = 5.0
     TELEGRAM_ALLOW_INSECURE_LOCAL_WEBHOOK: bool = True
+    TELEGRAM_LISTENER_IN_PROCESS: bool = False
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: str = ""
 
@@ -139,6 +141,8 @@ class Settings(BaseSettings):
             raise ValueError("EMAIL_DEV_MODE must be false outside local/test")
         if self.DATABASE_URL.strip().lower().startswith("sqlite"):
             raise ValueError("SQLite DATABASE_URL is only supported in local/test")
+        if self.TELEGRAM_LISTENER_IN_PROCESS:
+            raise ValueError("TELEGRAM_LISTENER_IN_PROCESS is only supported in local/test")
 
 
 settings = Settings()

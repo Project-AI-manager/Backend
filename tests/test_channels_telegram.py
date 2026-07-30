@@ -24,6 +24,7 @@ from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.email import EmailOutbox
 from app.models.knowledge import KbChunk, KbDocument
+from app.models.ops import AIUsageEvent
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User, UserNotificationSettings
 from app.services.channels.telegram import process_telegram_inbound_message
@@ -61,6 +62,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             CustomerIdentity.__table__,
             Conversation.__table__,
             Message.__table__,
+            AIUsageEvent.__table__,
             KbDocument.__table__,
             KbChunk.__table__,
         ):
@@ -97,6 +99,7 @@ async def seed_tenant(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     auto_reply_enabled: bool = True,
+    confidence_threshold: int = 50,
     role: str = "owner",
 ) -> None:
     async with session_factory() as session:
@@ -117,7 +120,7 @@ async def seed_tenant(
             TenantAIConfig(
                 tenant_id=TENANT_ID,
                 auto_reply_enabled=auto_reply_enabled,
-                confidence_threshold=50,
+                confidence_threshold=confidence_threshold,
                 llm_provider="mock",
                 embedding_model="local",
                 system_prompt="Отвечай по базе знаний.",
@@ -224,6 +227,100 @@ def test_connect_and_list_telegram_channel(
     assert listed.json()[0]["id"] == data["id"]
 
 
+def test_disconnect_telegram_channel_clears_credentials_and_preserves_history(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+    created = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    channel_id = uuid.UUID(created.json()["id"])
+
+    async def seed_history() -> uuid.UUID:
+        async with session_factory() as session:
+            customer = Customer(tenant_id=TENANT_ID, display_name="Client")
+            session.add(customer)
+            await session.flush()
+            conversation = Conversation(
+                tenant_id=TENANT_ID,
+                customer_id=customer.id,
+                channel_id=channel_id,
+                status="closed",
+            )
+            session.add(conversation)
+            await session.commit()
+            return conversation.id
+
+    conversation_id = asyncio.run(seed_history())
+    response = client.delete(
+        f"/api/v1/channels/{channel_id}",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "disabled"
+    assert response.json()["settings"] == {}
+
+    async def stored_state() -> tuple[Channel | None, Conversation | None]:
+        async with session_factory() as session:
+            return (
+                await session.get(Channel, channel_id),
+                await session.get(Conversation, conversation_id),
+            )
+
+    channel, conversation = asyncio.run(stored_state())
+    assert channel is not None
+    assert channel.credentials_encrypted == ""
+    assert channel.settings == {}
+    assert conversation is not None
+
+
+def test_disconnect_channel_requires_admin_and_hides_unknown_id(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+    created = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    channel_id = created.json()["id"]
+
+    async def make_manager() -> None:
+        async with session_factory() as session:
+            user = await session.get(User, USER_ID)
+            assert user is not None
+            user.role = "manager"
+            await session.commit()
+
+    asyncio.run(make_manager())
+
+    forbidden = client.delete(
+        f"/api/v1/channels/{channel_id}",
+        headers=auth_headers(role="manager"),
+    )
+
+    async def restore_owner() -> None:
+        async with session_factory() as session:
+            user = await session.get(User, USER_ID)
+            assert user is not None
+            user.role = "owner"
+            await session.commit()
+
+    asyncio.run(restore_owner())
+    missing = client.delete(
+        f"/api/v1/channels/{uuid.uuid4()}",
+        headers=auth_headers(),
+    )
+
+    assert forbidden.status_code == 403
+    assert missing.status_code == 404
+
+
 def test_manager_cannot_connect_telegram_channel(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -273,6 +370,13 @@ def test_telegram_webhook_creates_conversation_and_auto_reply(
     assert thread_data["messages"][1]["sender_type"] == "ai"
     assert "15 минут" in thread_data["messages"][1]["text"]
     assert thread_data["messages"][1]["ai_meta"]["provider"] == "mock"
+
+    async def usage_events_count() -> int:
+        async with session_factory() as session:
+            result = await session.execute(select(func.count()).select_from(AIUsageEvent))
+            return result.scalar_one()
+
+    assert asyncio.run(usage_events_count()) == 1
 
 
 def test_new_inbound_reopens_closed_conversation_without_duplicate(
@@ -343,6 +447,54 @@ def test_new_inbound_reopens_closed_conversation_without_duplicate(
         "Новый вопрос после закрытия",
         ]
     )
+
+
+def test_telegram_standalone_greeting_gets_ai_reply_without_knowledge(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+
+    class EmptyRetriever:
+        async def retrieve(
+            self,
+            tenant_id: uuid.UUID,
+            query: str,
+            *,
+            limit: int = 4,
+        ):
+            del tenant_id, query, limit
+            return []
+
+    async def empty_retriever(*_args: object, **_kwargs: object) -> EmptyRetriever:
+        return EmptyRetriever()
+
+    monkeypatch.setattr(
+        "app.services.channels.telegram.get_memory_retriever",
+        empty_retriever,
+    )
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1110, text="Привет!"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "auto_reply"
+    thread = client.get(
+        f"/api/v1/conversations/{response.json()['conversation_id']}",
+        headers=auth_headers(),
+    ).json()
+    assert thread["status"] == "auto"
+    assert [message["sender_type"] for message in thread["messages"]] == [
+        "customer",
+        "ai",
+    ]
 
 
 def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
@@ -491,6 +643,43 @@ def test_new_inbound_keeps_escalated_conversation_waiting_for_manager(
     )
     assert third.status_code == 200, third.text
     assert len(asyncio.run(escalation_outbox(session_factory))) == 1
+
+
+def test_hundred_percent_auto_reply_retries_an_escalated_conversation(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(
+        seed_tenant(
+            session_factory,
+            auto_reply_enabled=True,
+            confidence_threshold=100,
+        )
+    )
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    first = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1012, text="Нужна нестандартная интеграция"),
+    )
+    conversation_id = first.json()["conversation_id"]
+    assert first.json()["decision"] == "escalate"
+
+    second = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1013, text="Сколько занимает подключение Telegram?"),
+    )
+
+    assert second.status_code == 200, second.text
+    assert second.json()["decision"] == "auto_reply"
+    thread = client.get(
+        f"/api/v1/conversations/{conversation_id}",
+        headers=auth_headers(),
+    ).json()
+    assert thread["status"] == "auto"
 
 
 def test_provider_failure_safely_escalates_inbound(

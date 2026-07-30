@@ -2,6 +2,7 @@
 
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -17,6 +18,26 @@ class LLMProviderRequestError(RuntimeError):
     """Raised when a configured provider cannot complete a generation request."""
 
 
+@dataclass(frozen=True)
+class LLMUsage:
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    provider_cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class LLMGeneration:
+    text: str
+    provider: str
+    model: str
+    usage: LLMUsage = field(default_factory=LLMUsage)
+    request_id: str = ""
+
+
 class LLMProvider(ABC):
     provider_name = "base"
 
@@ -29,6 +50,25 @@ class LLMProvider(ABC):
         system_prompt: str = "",
         history: list[str] | None = None,
     ) -> str: ...
+
+    async def generate_with_usage(
+        self,
+        prompt: str,
+        context: list[str],
+        *,
+        system_prompt: str = "",
+        history: list[str] | None = None,
+    ) -> LLMGeneration:
+        return LLMGeneration(
+            text=await self.generate(
+                prompt,
+                context,
+                system_prompt=system_prompt,
+                history=history,
+            ),
+            provider=self.provider_name,
+            model="",
+        )
 
 
 class MockLLM(LLMProvider):
@@ -124,6 +164,22 @@ class OpenAICompatibleProvider(LLMProvider):
         system_prompt: str = "",
         history: list[str] | None = None,
     ) -> str:
+        generation = await self.generate_with_usage(
+            prompt,
+            context,
+            system_prompt=system_prompt,
+            history=history,
+        )
+        return generation.text
+
+    async def generate_with_usage(
+        self,
+        prompt: str,
+        context: list[str],
+        *,
+        system_prompt: str = "",
+        history: list[str] | None = None,
+    ) -> LLMGeneration:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": self._messages(
@@ -153,7 +209,66 @@ class OpenAICompatibleProvider(LLMProvider):
         content = self._extract_content(data)
         if not content:
             raise LLMProviderRequestError("OpenAI-compatible provider returned an empty answer")
-        return content
+        return LLMGeneration(
+            text=content,
+            provider=self.provider_name,
+            model=str(data.get("model") or self.model) if isinstance(data, dict) else self.model,
+            usage=self._extract_usage(data),
+            request_id=str(data.get("id") or "") if isinstance(data, dict) else "",
+        )
+
+    @staticmethod
+    def _extract_usage(data: Any) -> LLMUsage:
+        if not isinstance(data, dict) or not isinstance(data.get("usage"), dict):
+            return LLMUsage()
+        usage = data["usage"]
+        input_tokens = OpenAICompatibleProvider._usage_int(
+            usage, "prompt_tokens", "input_tokens"
+        )
+        output_tokens = OpenAICompatibleProvider._usage_int(
+            usage, "completion_tokens", "output_tokens"
+        )
+        input_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+        output_details = usage.get("completion_tokens_details") or usage.get(
+            "output_tokens_details"
+        )
+        cached = OpenAICompatibleProvider._usage_int(input_details, "cached_tokens")
+        cache_write = OpenAICompatibleProvider._usage_int(
+            input_details, "cache_write_tokens", "cache_creation_tokens"
+        )
+        reasoning = OpenAICompatibleProvider._usage_int(output_details, "reasoning_tokens")
+        total = OpenAICompatibleProvider._usage_int(usage, "total_tokens")
+        return LLMUsage(
+            input_tokens=input_tokens,
+            cached_input_tokens=min(cached, input_tokens),
+            cache_write_tokens=cache_write,
+            output_tokens=output_tokens,
+            reasoning_tokens=min(reasoning, output_tokens),
+            total_tokens=total or input_tokens + output_tokens,
+            provider_cost_usd=OpenAICompatibleProvider._usage_float(
+                usage, "cost", "response_cost", "total_cost"
+            ),
+        )
+
+    @staticmethod
+    def _usage_int(container: Any, *keys: str) -> int:
+        if not isinstance(container, dict):
+            return 0
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return max(0, value)
+        return 0
+
+    @staticmethod
+    def _usage_float(container: Any, *keys: str) -> float:
+        if not isinstance(container, dict):
+            return 0.0
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return max(0.0, float(value))
+        return 0.0
 
     @staticmethod
     def _messages(
@@ -237,9 +352,20 @@ class OpenAICompatibleProvider(LLMProvider):
     def _parse_sse_response(text: str) -> dict[str, Any]:
         content_parts: list[str] = []
         last_payload: dict[str, Any] = {}
+        response_usage: dict[str, Any] = {}
+        response_model = ""
+        response_id = ""
+        response_trailers: dict[str, str] = {}
 
         for raw_line in text.splitlines():
             line = raw_line.strip()
+            if line.startswith(":"):
+                trailer_name, separator, trailer_value = (
+                    line.removeprefix(":").strip().partition("=")
+                )
+                if separator and trailer_name.startswith("x-omniroute-"):
+                    response_trailers[trailer_name] = trailer_value.strip()
+                continue
             if not line.startswith("data:"):
                 continue
 
@@ -252,6 +378,12 @@ class OpenAICompatibleProvider(LLMProvider):
                 continue
 
             last_payload = payload
+            if isinstance(payload.get("usage"), dict):
+                response_usage = payload["usage"]
+            if isinstance(payload.get("model"), str):
+                response_model = payload["model"]
+            if isinstance(payload.get("id"), str):
+                response_id = payload["id"]
             choices = payload.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
@@ -273,8 +405,26 @@ class OpenAICompatibleProvider(LLMProvider):
                 if isinstance(content, str):
                     content_parts.append(content)
 
+        trailer_cost = response_trailers.get("x-omniroute-response-cost")
+        if trailer_cost:
+            try:
+                response_usage["response_cost"] = max(0.0, float(trailer_cost))
+            except ValueError:
+                pass
+        response_model = response_trailers.get("x-omniroute-model", response_model)
+        response_id = response_trailers.get("x-omniroute-request-id", response_id)
+
         if content_parts:
-            return {"choices": [{"message": {"content": "".join(content_parts)}}]}
+            result: dict[str, Any] = {
+                "choices": [{"message": {"content": "".join(content_parts)}}]
+            }
+            if response_usage:
+                result["usage"] = response_usage
+            if response_model:
+                result["model"] = response_model
+            if response_id:
+                result["id"] = response_id
+            return result
 
         return last_payload
 

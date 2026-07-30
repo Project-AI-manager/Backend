@@ -444,6 +444,75 @@ def test_close_conversation_marks_it_closed(
     assert data["delivered"] is None
 
 
+def test_manager_can_reply_to_closed_conversation_and_reopen_it(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    closed = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/close",
+        headers=auth_headers(),
+    )
+    assert closed.status_code == 200
+
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/reply",
+        headers=auth_headers(),
+        json={"text": "Хотите заказать ещё один товар?"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["conversation"]["status"] == "answered"
+
+
+def test_manager_can_reply_with_file_to_closed_conversation_and_reopen_it(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    monkeypatch.setattr(settings, "CONVERSATION_UPLOAD_DIR", str(tmp_path))
+    client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/close",
+        headers=auth_headers(),
+    )
+
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/reply-with-file",
+        headers=auth_headers(),
+        data={"text": "Дополнительная информация"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["conversation"]["status"] == "answered"
+
+
+def test_closed_conversation_can_be_exported_as_utf8_csv(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/close",
+        headers=auth_headers(),
+    )
+
+    response = client.get(
+        f"/api/v1/conversations/{CONVERSATION_ID}/export",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "attachment;" in response.headers["content-disposition"]
+    text = response.content.decode("utf-8-sig")
+    assert "Дата и время,Отправитель,Сообщение,Вложения,Статус" in text
+    assert "Клиент" in text
+    assert "Сколько занимает подключение?" in text
+
+
 def test_close_requires_conversation_in_current_tenant(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -722,7 +791,7 @@ def test_attachment_validation_size_type_and_signature(
     assert long_caption.status_code == 422
 
 
-def test_attachment_download_is_tenant_scoped_and_closed_chat_rejected(
+def test_attachment_download_is_tenant_scoped_and_closed_chat_can_be_reopened(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -739,8 +808,8 @@ def test_attachment_download_is_tenant_scoped_and_closed_chat_rejected(
         headers=auth_headers(),
         files={"file": ("note.txt", b"hello", "text/plain")},
     )
-    assert response.status_code == 409
-    assert not list(tmp_path.rglob("*.*"))
+    assert response.status_code == 200, response.text
+    assert response.json()["conversation"]["status"] == "answered"
 
     missing = client.get(
         f"/api/v1/conversations/{uuid.uuid4()}/attachments/{uuid.uuid4()}",

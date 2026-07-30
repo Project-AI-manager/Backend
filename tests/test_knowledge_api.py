@@ -346,6 +346,55 @@ def test_reindex_tenant_knowledge_reports_vector_store_connection_failure(
     assert detail["retryable"] is True
 
 
+def test_reindex_tenant_knowledge_reports_embedded_store_lock(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def locked_store() -> CapturingVectorStore:
+        raise RuntimeError(
+            "Storage folder .qdrant-data is already accessed by another instance"
+        )
+
+    monkeypatch.setattr("app.services.knowledge.get_vector_store", locked_store)
+    asyncio.run(seed_tenant(session_factory))
+
+    async def seed_document() -> None:
+        async with session_factory() as session:
+            document = KbDocument(
+                tenant_id=TENANT_ID,
+                title="FAQ",
+                source_type="manual",
+                status="ready",
+                version=1,
+            )
+            session.add(document)
+            await session.flush()
+            session.add(
+                KbChunk(
+                    tenant_id=TENANT_ID,
+                    document_id=document.id,
+                    text="Knowledge",
+                    position=0,
+                    token_count=1,
+                    vector_id=f"kb:{document.id}:0",
+                    tags={},
+                    version=1,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed_document())
+
+    response = client.post("/api/v1/knowledge/reindex", headers=auth_headers())
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "vector_store_unavailable"
+    assert detail["message"] == "Сервис векторной базы временно недоступен"
+    assert detail["retryable"] is True
+
+
 def test_create_knowledge_document_survives_vector_index_failure(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -370,6 +419,27 @@ def test_create_knowledge_document_survives_vector_index_failure(
 
     assert created.status_code == 200, created.text
     assert created.json()["status"] == "ready"
+
+
+def test_upload_survives_vector_index_failure_for_later_reindex(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.knowledge.get_vector_store",
+        lambda: CapturingVectorStore(fail=True),
+    )
+    asyncio.run(seed_tenant(session_factory))
+
+    response = client.post(
+        "/api/v1/knowledge/documents/upload",
+        headers=auth_headers(),
+        files={"file": ("guide.txt", b"Knowledge", "text/plain")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ready"
 
 
 @pytest.mark.parametrize(

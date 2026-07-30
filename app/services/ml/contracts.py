@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
+from app.services.rag.llm import LLMUsage
+
 Decision = Literal["auto_reply", "escalate"]
 ChatRole = Literal["customer", "manager", "ai", "system"]
 
@@ -39,7 +41,13 @@ class AssistantProfile:
     tone: str = "профессионально, дружелюбно и уверенно"
     language: str = "русский"
     sales_rules: tuple[str, ...] = (
-        "Отвечай кратко и по делу.",
+        "Отвечай как живой менеджер: вежливо, кратко и строго по делу.",
+        "Обычно достаточно 1–3 коротких предложений. Не пиши длинное вступление, "
+        "вывод или список, если клиент их не просил.",
+        "Не пересказывай вопрос клиента и не повторяй то, что уже было сказано в диалоге.",
+        "Учитывай всю историю разговора: договорённости, имена, уточнения и предыдущие ответы.",
+        "Не используй длинное тире или среднее тире в ответах. Перестраивай фразу "
+        "с запятой, двоеточием или отдельным предложением.",
         "Не обещай условия, которых нет в базе знаний.",
         "Если информации недостаточно, предложи уточнить у менеджера.",
         "Мягко подводи клиента к следующему шагу: покупка, бронь, консультация или контакт.",
@@ -74,3 +82,6 @@ class MLAnswerResult:
     sources: tuple[MemorySnippet, ...]
     provider: str
     prompt: PromptBundle
+    model: str = ""
+    request_id: str = ""
+    usage: LLMUsage = field(default_factory=LLMUsage)

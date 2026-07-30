@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -184,6 +185,10 @@ class QdrantVectorStore:
             wait=True,
         )
 
+    async def close(self) -> None:
+        """Release HTTP transports and, for embedded Qdrant, its storage lock."""
+        await self.client.close()
+
 
 def get_vector_store() -> VectorStore | None:
     if not settings.QDRANT_ENABLED:
@@ -191,11 +196,21 @@ def get_vector_store() -> VectorStore | None:
     configured_url = settings.QDRANT_URL.strip()
     local_path = settings.QDRANT_LOCAL_PATH.strip()
     if configured_url.lower() in {"local", "embedded", ":memory:"}:
+        # Embedded Qdrant is single-process.  The Telegram listener runs next
+        # to the API in local development, so it must retrieve from the SQL
+        # fallback instead of competing for the same directory lock.
+        if os.environ.get("AI_MANAGER_DISABLE_EMBEDDED_QDRANT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            return None
         return _embedded_vector_store(
             ":memory:" if configured_url.lower() == ":memory:" else local_path,
             collection=settings.QDRANT_COLLECTION,
             vector_size=settings.EMBEDDING_DIMENSION,
         )
+
     return QdrantVectorStore(
         url=configured_url,
         collection=settings.QDRANT_COLLECTION,
@@ -211,11 +226,33 @@ def _embedded_vector_store(
     vector_size: int,
 ) -> QdrantVectorStore:
     """Keep one local client per process because embedded storage holds a file lock."""
-    return QdrantVectorStore(
+    store = QdrantVectorStore(
         path=path,
         collection=collection,
         vector_size=vector_size,
     )
+    _embedded_store_instances().append(store)
+    return store
+
+
+async def close_vector_stores() -> None:
+    """Close process-local embedded stores before a worker or dev reload exits.
+
+    Embedded Qdrant takes an exclusive lock on its data directory.  Without an
+    explicit close, another long-running process (for example the Telegram
+    listener) or a Uvicorn reload can leave the API unable to open the store.
+    """
+    stores = list(_embedded_store_instances())
+    for store in stores:
+        await store.close()
+    _embedded_store_instances.cache_clear()
+    _embedded_vector_store.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _embedded_store_instances() -> list[QdrantVectorStore]:
+    """Mutable registry kept separately so cached embedded clients can be closed."""
+    return []
 
 
 def _collection_vector_size(collection: Any) -> int | None:

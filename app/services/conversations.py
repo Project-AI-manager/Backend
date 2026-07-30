@@ -240,10 +240,6 @@ async def reply_to_conversation_with_file(
     conversation, _customer_name, channel = await _conversation_with_channel(
         session, tenant_id, conversation_id
     )
-    if conversation.status == "closed":
-        for attachment in attachments:
-            delete_attachment(attachment.path)
-        raise HTTPException(status.HTTP_409_CONFLICT, "Диалог закрыт")
     latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
     chat_id = _message_chat_id(latest_inbound)
     replied_at = datetime.now(UTC)
