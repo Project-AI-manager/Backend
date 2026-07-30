@@ -68,3 +68,5 @@ class TelegramMTProtoInbound(BaseModel):
     message_id: int
     text: str
     sender_name: str = ""
+    avatar_bytes: bytes | None = None
+    avatar_checked: bool = False

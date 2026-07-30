@@ -275,6 +275,76 @@ def test_telegram_webhook_creates_conversation_and_auto_reply(
     assert thread_data["messages"][1]["ai_meta"]["provider"] == "mock"
 
 
+def test_new_inbound_reopens_closed_conversation_without_duplicate(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+
+    class EmptyRetriever:
+        async def retrieve(
+            self,
+            tenant_id: uuid.UUID,
+            query: str,
+            *,
+            limit: int = 4,
+        ):
+            del tenant_id, query, limit
+            return []
+
+    async def empty_retriever(*_args: object, **_kwargs: object) -> EmptyRetriever:
+        return EmptyRetriever()
+
+    monkeypatch.setattr(
+        "app.services.channels.telegram.get_memory_retriever",
+        empty_retriever,
+    )
+
+    first = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1101, text="Первый вопрос"),
+    )
+    assert first.status_code == 200, first.text
+    conversation_id = first.json()["conversation_id"]
+    closed = client.post(
+        f"/api/v1/conversations/{conversation_id}/close",
+        headers=auth_headers(),
+    )
+    assert closed.status_code == 200
+    assert closed.json()["conversation"]["status"] == "closed"
+
+    second_payload = telegram_payload(update_id=1102, text="Новый вопрос после закрытия")
+    second_payload["message"]["message_id"] = 502
+    second = client.post("/api/v1/channels/webhook/telegram", json=second_payload)
+
+    assert second.status_code == 200, second.text
+    assert second.json()["conversation_id"] == conversation_id
+    assert asyncio.run(count_rows(session_factory, Conversation)) == 1
+    thread = client.get(
+        f"/api/v1/conversations/{conversation_id}",
+        headers=auth_headers(),
+    )
+    assert thread.status_code == 200
+    assert thread.json()["status"] in {"auto", "escalated"}
+    inbound_texts = [
+        message["text"]
+        for message in thread.json()["messages"]
+        if message["direction"] == "inbound"
+    ]
+    assert sorted(inbound_texts) == sorted(
+        [
+        "Первый вопрос",
+        "Новый вопрос после закрытия",
+        ]
+    )
+
+
 def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

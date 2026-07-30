@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     S3_BUCKET: str = "ai-manager"
     CONVERSATION_UPLOAD_DIR: str = ".conversation-uploads"
     CONVERSATION_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
+    CUSTOMER_AVATAR_DIR: str = ".customer-avatars"
+    CUSTOMER_AVATAR_MAX_BYTES: int = 5 * 1024 * 1024
 
     LLM_PROVIDER: str = "mock"
     EMBEDDING_PROVIDER: str = "local"

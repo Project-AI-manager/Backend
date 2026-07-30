@@ -176,7 +176,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 }
             )
 
-        for turn in history[-8:]:
+        for turn in history:
             role, content = OpenAICompatibleProvider._history_turn(turn)
             if content:
                 messages.append({"role": role, "content": content})

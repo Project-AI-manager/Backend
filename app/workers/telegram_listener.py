@@ -20,11 +20,31 @@ from app.services.channels.telegram_mtproto import (
     create_authorized_client,
     ingest_mtproto_message,
     mark_mtproto_messages_read,
+    reconcile_mtproto_messages_read,
+    sync_mtproto_customer_avatars,
 )
 
 
 async def _run_channel(channel: Channel) -> None:
     client = await create_authorized_client(channel)
+
+    async with SessionLocal() as session:
+        live_channel = await session.get(Channel, channel.id)
+        if live_channel is not None and live_channel.status == "active":
+            try:
+                refreshed = await sync_mtproto_customer_avatars(session, live_channel, client)
+                if refreshed:
+                    log.info(
+                        "telegram_customer_avatars_refreshed",
+                        channel_id=str(channel.id),
+                        customers=refreshed,
+                    )
+            except Exception as error:
+                log.warning(
+                    "telegram_customer_avatars_refresh_failed",
+                    channel_id=str(channel.id),
+                    error=str(error),
+                )
 
     @client.on(events.NewMessage(incoming=True))
     async def on_message(event: events.NewMessage.Event) -> None:
@@ -43,6 +63,20 @@ async def _run_channel(channel: Channel) -> None:
             )
             if part
         ) or str(getattr(sender, "username", "") or event.sender_id or "Telegram")
+        avatar_bytes: bytes | None = None
+        avatar_checked = False
+        try:
+            if getattr(sender, "photo", None) is not None:
+                downloaded = await client.download_profile_photo(sender, file=bytes)
+                avatar_bytes = downloaded if isinstance(downloaded, bytes) else None
+            avatar_checked = True
+        except Exception as error:
+            log.warning(
+                "telegram_customer_avatar_download_failed",
+                channel_id=str(channel.id),
+                sender_id=str(event.sender_id),
+                error=str(error),
+            )
         async with SessionLocal() as session:
             live_channel = await session.get(Channel, channel.id)
             if live_channel is None or live_channel.status != "active":
@@ -57,6 +91,8 @@ async def _run_channel(channel: Channel) -> None:
                     message_id=int(event.id),
                     text=text,
                     sender_name=sender_name,
+                    avatar_bytes=avatar_bytes,
+                    avatar_checked=avatar_checked,
                 ),
             )
 
@@ -72,7 +108,39 @@ async def _run_channel(channel: Channel) -> None:
                 max_message_id=int(event.max_id),
             )
 
-    await client.run_until_disconnected()
+    receipt_task = asyncio.create_task(
+        _poll_read_receipts(client, channel.id),
+        name=f"telegram-read-receipts:{channel.id}",
+    )
+    try:
+        await client.run_until_disconnected()
+    finally:
+        receipt_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await receipt_task
+
+
+async def _poll_read_receipts(client: object, channel_id: UUID) -> None:
+    """Periodically reconcile durable dialog watermarks with local messages."""
+    while True:
+        try:
+            async with SessionLocal() as session:
+                changed = await reconcile_mtproto_messages_read(session, channel_id, client)
+            if changed:
+                log.info(
+                    "telegram_read_receipts_reconciled",
+                    channel_id=str(channel_id),
+                    messages=changed,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.warning(
+                "telegram_read_receipts_reconcile_failed",
+                channel_id=str(channel_id),
+                error=str(error),
+            )
+        await asyncio.sleep(5)
 
 
 async def main() -> None:

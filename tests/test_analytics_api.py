@@ -31,6 +31,10 @@ OTHER_TENANT_ID = uuid.UUID("66666666-6666-4666-8666-666666666602")
 USER_ID = uuid.UUID("66666666-6666-4666-8666-666666666603")
 CHANNEL_ID = uuid.UUID("66666666-6666-4666-8666-666666666604")
 CUSTOMER_ID = uuid.UUID("66666666-6666-4666-8666-666666666605")
+AUTO_CUSTOMER_ID = uuid.UUID("66666666-6666-4666-8666-666666666606")
+ESCALATED_CUSTOMER_ID = uuid.UUID("66666666-6666-4666-8666-666666666607")
+OTHER_CHANNEL_ID = uuid.UUID("66666666-6666-4666-8666-666666666608")
+OTHER_CUSTOMER_ID = uuid.UUID("66666666-6666-4666-8666-666666666609")
 
 
 def create_table(sync_connection: Connection, table: object) -> None:
@@ -113,10 +117,37 @@ async def seed_analytics_data(session_factory: async_sessionmaker[AsyncSession])
                     credentials_encrypted="fernet:test",
                     settings={},
                 ),
+                Channel(
+                    id=OTHER_CHANNEL_ID,
+                    tenant_id=OTHER_TENANT_ID,
+                    type="telegram",
+                    name="Other Telegram",
+                    status="active",
+                    credentials_encrypted="fernet:other",
+                    settings={},
+                ),
                 Customer(
                     id=CUSTOMER_ID,
                     tenant_id=TENANT_ID,
                     display_name="Alina",
+                    note="",
+                ),
+                Customer(
+                    id=AUTO_CUSTOMER_ID,
+                    tenant_id=TENANT_ID,
+                    display_name="Auto customer",
+                    note="",
+                ),
+                Customer(
+                    id=ESCALATED_CUSTOMER_ID,
+                    tenant_id=TENANT_ID,
+                    display_name="Escalated customer",
+                    note="",
+                ),
+                Customer(
+                    id=OTHER_CUSTOMER_ID,
+                    tenant_id=OTHER_TENANT_ID,
+                    display_name="Other customer",
                     note="",
                 ),
             ]
@@ -152,7 +183,7 @@ async def seed_analytics_data(session_factory: async_sessionmaker[AsyncSession])
         )
         auto_conversation = Conversation(
             tenant_id=TENANT_ID,
-            customer_id=CUSTOMER_ID,
+            customer_id=AUTO_CUSTOMER_ID,
             channel_id=CHANNEL_ID,
             status="auto",
             last_message_at=now,
@@ -161,7 +192,7 @@ async def seed_analytics_data(session_factory: async_sessionmaker[AsyncSession])
         )
         escalated_conversation = Conversation(
             tenant_id=TENANT_ID,
-            customer_id=CUSTOMER_ID,
+            customer_id=ESCALATED_CUSTOMER_ID,
             channel_id=CHANNEL_ID,
             status="escalated",
             last_message_at=now,
@@ -170,8 +201,8 @@ async def seed_analytics_data(session_factory: async_sessionmaker[AsyncSession])
         )
         other_conversation = Conversation(
             tenant_id=OTHER_TENANT_ID,
-            customer_id=CUSTOMER_ID,
-            channel_id=CHANNEL_ID,
+            customer_id=OTHER_CUSTOMER_ID,
+            channel_id=OTHER_CHANNEL_ID,
             status="auto",
             last_message_at=now,
             last_message_preview="Other",

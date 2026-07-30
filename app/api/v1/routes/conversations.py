@@ -3,7 +3,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
@@ -22,6 +22,7 @@ from app.services.conversations import (
     close_conversation,
     escalate_conversation,
     get_conversation_attachment,
+    get_conversation_avatar,
     get_conversation_thread,
     list_conversations,
     mark_conversation_read,
@@ -48,6 +49,27 @@ async def get_conversation(
     session: SessionDep,
 ) -> ConversationThreadResponse:
     return await get_conversation_thread(session, tenant_id_from_user(user), conversation_id)
+
+
+@router.get("/{conversation_id}/avatar", response_class=FileResponse)
+async def customer_avatar(
+    conversation_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+) -> FileResponse:
+    path, content_type = await get_conversation_avatar(
+        session,
+        tenant_id_from_user(user),
+        conversation_id,
+    )
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/{conversation_id}/read", response_model=ConversationThreadResponse)
@@ -84,19 +106,34 @@ async def reply_with_file(
     conversation_id: uuid.UUID,
     user: CurrentUser,
     session: SessionDep,
-    file: Annotated[UploadFile, File()],
+    file: Annotated[list[UploadFile] | None, File()] = None,
+    files: Annotated[list[UploadFile] | None, File()] = None,
+    bracket_files: Annotated[list[UploadFile] | None, File(alias="files[]")] = None,
     text: Annotated[str, Form(max_length=1024)] = "",
 ) -> ConversationActionResponse:
     tenant_id = tenant_id_from_user(user)
-    data = await file.read(settings.CONVERSATION_ATTACHMENT_MAX_BYTES + 1)
-    stored = validate_and_store_attachment(
-        tenant_id=tenant_id,
-        conversation_id=conversation_id,
-        filename=file.filename or "",
-        content_type=file.content_type,
-        data=data,
-    )
+    uploads = (file or []) + (files or []) + (bracket_files or [])
+    if not uploads:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Добавьте хотя бы один файл")
+    if len(uploads) > 10:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "За одно сообщение можно прикрепить не более 10 файлов",
+        )
+
+    stored = []
     try:
+        for upload in uploads:
+            data = await upload.read(settings.CONVERSATION_ATTACHMENT_MAX_BYTES + 1)
+            stored.append(
+                validate_and_store_attachment(
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    filename=upload.filename or "",
+                    content_type=upload.content_type,
+                    data=data,
+                )
+            )
         return await reply_to_conversation_with_file(
             session,
             tenant_id,
@@ -106,7 +143,8 @@ async def reply_with_file(
             stored,
         )
     except Exception:
-        delete_attachment(stored.path)
+        for attachment in stored:
+            delete_attachment(attachment.path)
         raise
 
 

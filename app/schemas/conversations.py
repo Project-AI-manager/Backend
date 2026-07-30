@@ -29,6 +29,7 @@ class ConversationResponse(BaseModel):
     channel_type: str
     customer_id: UUID
     customer_name: str
+    avatar_url: str | None = None
     status: str
     last_message_at: datetime | None
     last_message_preview: str

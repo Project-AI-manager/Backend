@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -21,7 +22,7 @@ from app.core.security import create_token
 from app.db.session import get_session
 from app.main import app
 from app.models.channel import Channel
-from app.models.conversation import Conversation, Customer, Message
+from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.tenant import Tenant
 from app.models.user import User
 
@@ -42,6 +43,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             User.__table__,
             Channel.__table__,
             Customer.__table__,
+            CustomerIdentity.__table__,
             Conversation.__table__,
             Message.__table__,
         ):
@@ -173,6 +175,12 @@ def test_mtproto_delivery_uses_access_hash_and_returns_message_id(
     sent_to: list[object] = []
 
     class FakeClient:
+        async def iter_dialogs(self):
+            yield SimpleNamespace(
+                id=6154961834,
+                dialog=SimpleNamespace(read_outbox_max_id=4242),
+            )
+
         async def send_message(self, peer: object, text: str) -> object:
             sent_to.append(peer)
             assert text == "Ответ"
@@ -205,6 +213,7 @@ def test_mtproto_delivery_uses_access_hash_and_returns_message_id(
 
     assert result.delivered is True
     assert result.message_id == 4242
+    assert result.read is True
     assert sent_to[0].user_id == 6154961834
     assert sent_to[0].access_hash == 987654321
 
@@ -221,7 +230,11 @@ def test_mtproto_delivery_refreshes_dialogs_for_legacy_conversation(
             raise ValueError("entity cache is empty")
 
         async def iter_dialogs(self):
-            yield SimpleNamespace(id=6154961834, input_entity=legacy_peer)
+            yield SimpleNamespace(
+                id=6154961834,
+                input_entity=legacy_peer,
+                dialog=SimpleNamespace(read_outbox_max_id=499),
+            )
 
         async def send_message(self, peer: object, _text: str) -> object:
             assert peer is legacy_peer
@@ -247,6 +260,7 @@ def test_mtproto_delivery_refreshes_dialogs_for_legacy_conversation(
 
     assert result.delivered is True
     assert result.message_id == 500
+    assert result.read is False
 
 
 def test_mtproto_client_setup_failure_becomes_bad_gateway(
@@ -272,6 +286,57 @@ def test_mtproto_client_setup_failure_becomes_bad_gateway(
         asyncio.run(telegram_mtproto.send_mtproto_message(channel, "7001", "Ответ"))
 
     assert error.value.status_code == 502
+
+
+def test_existing_customer_avatar_backfill_is_tenant_scoped(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.channels.telegram_mtproto import sync_mtproto_customer_avatars
+    from app.services.customer_avatars import get_customer_avatar
+
+    monkeypatch.setattr(settings, "CUSTOMER_AVATAR_DIR", str(tmp_path))
+    channel_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    jpeg = b"\xff\xd8\xff" + b"telegram-avatar"
+
+    class FakeClient:
+        async def iter_dialogs(self):
+            yield SimpleNamespace(id=7001, entity=SimpleNamespace(photo=object()))
+            yield SimpleNamespace(id=9999, entity=SimpleNamespace(photo=object()))
+
+        async def download_profile_photo(self, entity: object, *, file: object) -> bytes:
+            assert file is bytes
+            return jpeg
+
+    async def seed_and_sync() -> int:
+        async with session_factory() as session:
+            channel = Channel(
+                id=channel_id,
+                tenant_id=TENANT_ID,
+                type="telegram",
+                name="Telegram",
+                status="active",
+                credentials_encrypted="encrypted",
+                settings={"transport": "mtproto"},
+            )
+            session.add(channel)
+            session.add(Customer(id=customer_id, tenant_id=TENANT_ID, display_name="Client"))
+            session.add(
+                CustomerIdentity(
+                    customer_id=customer_id,
+                    channel_id=channel_id,
+                    external_user_id="7001",
+                )
+            )
+            await session.commit()
+            return await sync_mtproto_customer_avatars(session, channel, FakeClient())  # type: ignore[arg-type]
+
+    assert asyncio.run(seed_and_sync()) == 1
+    stored = get_customer_avatar(TENANT_ID, customer_id)
+    assert stored is not None
+    assert Path(stored[0]).read_bytes() == jpeg
 
 
 def test_mtproto_read_receipt_marks_sent_outbound_messages_read(
@@ -396,3 +461,102 @@ def test_read_watermark_closes_receipt_before_message_commit_race(
     changed, final_status = asyncio.run(seed_and_apply())
     assert changed == 0
     assert final_status == "read"
+
+
+def test_read_receipt_reconciliation_recovers_missed_telegram_update(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    channel_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+
+    class FakeClient:
+        async def __call__(self, request: object) -> SimpleNamespace:
+            assert request.__class__.__name__ == "GetPeerDialogsRequest"
+            return SimpleNamespace(
+                dialogs=[
+                    SimpleNamespace(
+                        peer=SimpleNamespace(user_id=7001),
+                        read_outbox_max_id=61,
+                    )
+                ]
+            )
+
+    async def fake_resolve_peer(
+        _client: object,
+        peer_id: int,
+        _access_hash: int | None,
+    ) -> object:
+        return SimpleNamespace(user_id=peer_id)
+
+    def fake_get_peer_id(peer: object) -> int:
+        return int(cast(SimpleNamespace, peer).user_id)
+
+    monkeypatch.setattr(telegram_mtproto, "_resolve_peer", fake_resolve_peer)
+    monkeypatch.setattr(telegram_mtproto.telegram_utils, "get_peer_id", fake_get_peer_id)
+
+    async def seed_and_reconcile() -> tuple[int, dict[int, str], dict[str, int]]:
+        async with session_factory() as session:
+            session.add(
+                Channel(
+                    id=channel_id,
+                    tenant_id=TENANT_ID,
+                    type="telegram",
+                    name="Telegram",
+                    status="active",
+                    credentials_encrypted="encrypted",
+                    settings={"transport": "mtproto"},
+                )
+            )
+            session.add(Customer(id=customer_id, tenant_id=TENANT_ID, display_name="Клиент"))
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    tenant_id=TENANT_ID,
+                    customer_id=customer_id,
+                    channel_id=channel_id,
+                    status="answered",
+                    unread_count=0,
+                )
+            )
+            for telegram_id in (60, 62):
+                session.add(
+                    Message(
+                        tenant_id=TENANT_ID,
+                        conversation_id=conversation_id,
+                        direction="outbound",
+                        sender_type="manager",
+                        text=f"Ответ {telegram_id}",
+                        status="sent",
+                        ai_meta={
+                            "chat_id": "7001",
+                            "peer_access_hash": 123,
+                            "telegram_message_id": telegram_id,
+                        },
+                    )
+                )
+            await session.commit()
+            changed = await telegram_mtproto.reconcile_mtproto_messages_read(
+                session,
+                channel_id,
+                FakeClient(),  # type: ignore[arg-type]
+            )
+            result = await session.execute(select(Message))
+            channel = await session.get(Channel, channel_id)
+            assert channel is not None
+            return (
+                changed,
+                {
+                    int(message.ai_meta["telegram_message_id"]): message.status
+                    for message in result.scalars().all()
+                },
+                channel.settings["read_watermarks"],
+            )
+
+    changed, statuses, watermarks = asyncio.run(seed_and_reconcile())
+    assert changed == 1
+    assert statuses == {60: "read", 62: "sent"}
+    assert watermarks == {"7001": 61}

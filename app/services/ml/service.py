@@ -20,7 +20,7 @@ class MLMessageService:
         self.llm = llm or get_llm()
 
     async def answer(self, request: MLAnswerInput) -> MLAnswerResult:
-        recent_history = request.history[-8:]
+        history = request.history
         memory = list(request.memory_override) or await self.retriever.retrieve(
             tenant_id=request.tenant_id,
             query=request.message,
@@ -29,14 +29,14 @@ class MLMessageService:
             message=request.message,
             profile=request.profile,
             memory=memory,
-            history=recent_history,
+            history=history,
             custom_system_prompt=request.custom_system_prompt,
         )
         answer_text = await self.llm.generate(
             prompt.user_prompt,
             [snippet.text for snippet in memory],
             system_prompt=prompt.system_prompt,
-            history=[f"{turn.role}: {turn.text}" for turn in recent_history],
+            history=[f"{turn.role}: {turn.text}" for turn in history],
         )
         confidence = self._confidence(memory=memory, answer_text=answer_text)
         can_auto_reply = (

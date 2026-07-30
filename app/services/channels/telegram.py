@@ -290,6 +290,7 @@ async def process_telegram_inbound_message(
         )
         history = await _conversation_history(
             session,
+            channel.tenant_id,
             conversation.id,
             exclude_message_id=inbound.id,
         )
@@ -367,7 +368,9 @@ async def process_telegram_inbound_message(
             peer_access_hash=(inbound.ai_meta or {}).get("peer_access_hash"),
         )
         outbound.status = (
-            "sent"
+            "read"
+            if delivered and delivery == "telegram-read"
+            else "sent"
             if delivered
             else "failed"
             if delivery == "telegram-mtproto-failed"
@@ -452,9 +455,10 @@ async def _deliver_telegram_reply(
         )
         delivered = delivery.delivered if hasattr(delivery, "delivered") else bool(delivery)
         message_id = getattr(delivery, "message_id", None)
+        receipt = "telegram-read" if getattr(delivery, "read", False) else "telegram-mtproto"
         return (
             delivered,
-            "telegram-mtproto" if delivered else "telegram-mtproto-failed",
+            receipt if delivered else "telegram-mtproto-failed",
             message_id,
         )
 
@@ -581,15 +585,24 @@ async def _get_or_create_conversation(
     message: NormalizedMessage,
 ) -> Conversation:
     result = await session.execute(
-        select(Conversation).where(
+        select(Conversation)
+        .where(
             Conversation.tenant_id == channel.tenant_id,
             Conversation.channel_id == channel.id,
             Conversation.customer_id == customer.id,
-            Conversation.status.in_(("open", "auto", "answered", "escalated")),
         )
+        .order_by(
+            Conversation.last_message_at.desc().nulls_last(),
+            Conversation.created_at.desc(),
+            Conversation.id.desc(),
+        )
+        .with_for_update()
     )
     conversation = result.scalars().first()
     if conversation:
+        if conversation.status in {"closed", "snoozed"}:
+            conversation.status = "open"
+            conversation.assignee_user_id = None
         return conversation
 
     conversation = Conversation(
@@ -602,21 +615,46 @@ async def _get_or_create_conversation(
         last_message_preview=message.text,
         unread_count=0,
     )
-    session.add(conversation)
-    await session.flush()
-    return conversation
+    try:
+        async with session.begin_nested():
+            session.add(conversation)
+            await session.flush()
+        return conversation
+    except IntegrityError:
+        # A second inbound update can race us after the lookup. The database
+        # unique constraint picks the canonical row; reuse it without losing
+        # the surrounding webhook transaction.
+        concurrent = await session.execute(
+            select(Conversation).where(
+                Conversation.tenant_id == channel.tenant_id,
+                Conversation.channel_id == channel.id,
+                Conversation.customer_id == customer.id,
+            )
+        )
+        existing = concurrent.scalar_one_or_none()
+        if existing is None:
+            raise
+        if existing.status in {"closed", "snoozed"}:
+            existing.status = "open"
+            existing.assignee_user_id = None
+        return existing
 
 
 async def _conversation_history(
     session: AsyncSession,
+    tenant_id: UUID,
     conversation_id: UUID,
     *,
     exclude_message_id: UUID,
 ) -> list[ChatTurn]:
     result = await session.execute(
         select(Message)
-        .where(Message.conversation_id == conversation_id, Message.id != exclude_message_id)
-        .order_by(Message.created_at)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.tenant_id == tenant_id,
+            Message.id != exclude_message_id,
+        )
+        .order_by(Message.created_at, Message.id)
     )
     turns: list[ChatTurn] = []
     for message in result.scalars().all():

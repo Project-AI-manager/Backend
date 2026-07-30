@@ -8,6 +8,7 @@ __pycache__/
 .model-cache/
 .qdrant-data/
 .conversation-uploads/
+.customer-avatars/
 *.egg-info/
 
 # Env / secrets

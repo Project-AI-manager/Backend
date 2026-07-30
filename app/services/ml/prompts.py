@@ -59,6 +59,6 @@ def build_history_block(history: tuple[ChatTurn, ...]) -> str:
     if not history:
         return ""
     lines = ["История диалога:"]
-    for turn in history[-8:]:
+    for turn in history:
         lines.append(f"{turn.role}: {turn.text}")
     return "\n".join(lines)

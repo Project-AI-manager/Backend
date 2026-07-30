@@ -226,7 +226,11 @@ def test_manager_reply_via_mtproto_persists_telegram_delivery_metadata(
         peer_access_hash: int | None = None,
     ) -> object:
         calls.append((peer_id, text, peer_access_hash))
-        return type("Delivery", (), {"delivered": True, "message_id": 4242})()
+        return type(
+            "Delivery",
+            (),
+            {"delivered": True, "message_id": 4242, "read": True},
+        )()
 
     asyncio.run(enable_mtproto())
     monkeypatch.setattr("app.services.conversations.send_mtproto_message", fake_send)
@@ -240,7 +244,7 @@ def test_manager_reply_via_mtproto_persists_telegram_delivery_metadata(
     assert response.status_code == 200, response.text
     message = response.json()["message"]
     assert calls == [("7001", "Ответ через Telegram.", 987654321)]
-    assert message["status"] == "sent"
+    assert message["status"] == "read"
     assert message["ai_meta"]["telegram_message_id"] == 4242
     assert message["ai_meta"]["delivery"] == "channel-sent"
 
@@ -294,6 +298,46 @@ def test_conversation_responses_include_channel_type(
     assert thread_response.status_code == 200, thread_response.text
     assert thread_response.json()["channel_type"] == "telegram"
     assert thread_response.json()["messages"][0]["sender_user_id"] is None
+
+
+def test_conversation_avatar_is_private_and_exposed_by_url(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.customer_avatars import store_customer_avatar
+
+    asyncio.run(seed_conversation(session_factory))
+    monkeypatch.setattr(settings, "CUSTOMER_AVATAR_DIR", str(tmp_path))
+    jpeg = b"\xff\xd8\xff" + b"avatar"
+    assert store_customer_avatar(TENANT_ID, CUSTOMER_ID, jpeg)
+
+    listed = client.get("/api/v1/conversations", headers=auth_headers())
+    assert listed.status_code == 200
+    avatar_url = listed.json()[0]["avatar_url"]
+    assert avatar_url == f"/api/v1/conversations/{CONVERSATION_ID}/avatar"
+
+    unauthorized = client.get(avatar_url)
+    assert unauthorized.status_code in {401, 403}
+    downloaded = client.get(avatar_url, headers=auth_headers())
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"] == "image/jpeg"
+    assert downloaded.headers["cache-control"] == "private, max-age=300"
+    assert downloaded.content == jpeg
+
+
+def test_conversation_without_avatar_has_no_avatar_url(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    monkeypatch.setattr(settings, "CUSTOMER_AVATAR_DIR", str(tmp_path))
+    response = client.get("/api/v1/conversations", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json()[0]["avatar_url"] is None
 
 
 def test_mark_conversation_read_clears_unread_count(
@@ -550,6 +594,63 @@ def test_mtproto_document_attachment_uses_document_mode(
     )
     assert response.status_code == 200, response.text
     assert document_mode == [True]
+
+
+def test_mtproto_multiple_attachments_keep_order_and_send_caption_once(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    monkeypatch.setattr(settings, "CONVERSATION_UPLOAD_DIR", str(tmp_path))
+
+    async def enable_mtproto() -> None:
+        async with session_factory() as session:
+            channel = await session.get(Channel, CHANNEL_ID)
+            assert channel is not None
+            channel.settings = {**channel.settings, "transport": "mtproto"}
+            await session.commit()
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_send_file(
+        _channel: Channel,
+        _peer_id: str,
+        file_path: str,
+        caption: str,
+        **_kwargs: object,
+    ) -> object:
+        calls.append((Path(file_path).name, caption))
+        return type(
+            "Delivery",
+            (),
+            {"delivered": True, "message_id": 100 + len(calls), "read": False},
+        )()
+
+    asyncio.run(enable_mtproto())
+    monkeypatch.setattr("app.services.conversations.send_mtproto_file", fake_send_file)
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/reply-with-file",
+        headers=auth_headers(),
+        data={"text": "Документы по порядку"},
+        files=[
+            ("files", ("first.txt", b"first", "text/plain")),
+            ("files", ("second.pdf", b"%PDF-1.7\nsecond", "application/pdf")),
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    message = response.json()["message"]
+    items = message["attachments"]["items"]
+    assert [item["name"] for item in items] == ["first.txt", "second.pdf"]
+    assert [item["telegram_message_id"] for item in items] == [101, 102]
+    assert calls == [
+        (Path(items[0]["download_url"]).name + ".txt", "Документы по порядку"),
+        (Path(items[1]["download_url"]).name + ".pdf", ""),
+    ]
+    assert message["text"] == "Документы по порядку"
+    assert message["status"] == "sent"
 
 
 def test_bot_api_attachment_selects_photo_and_persists_message_id(

@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.channel import Channel
@@ -29,6 +29,7 @@ from app.services.conversation_attachments import (
     attachment_path,
     delete_attachment,
 )
+from app.services.customer_avatars import customer_avatar_exists, get_customer_avatar
 from app.services.escalation_notifications import notify_escalation_if_due
 
 
@@ -71,7 +72,11 @@ async def get_conversation_thread(
     messages_result = await session.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id, Message.tenant_id == tenant_id)
-        .order_by(Message.created_at, Message.id)
+        .order_by(
+            Message.created_at,
+            case((Message.direction == "inbound", 0), else_=1),
+            Message.id,
+        )
     )
     base = _conversation_response(conversation, customer_name, channel_type)
     return ConversationThreadResponse(
@@ -145,9 +150,11 @@ async def reply_to_conversation(
     session.add(message)
     await session.flush()
 
-    delivered = await _deliver_outbound_message(channel, message)
+    delivered, read = await _deliver_outbound_message(channel, message)
     transport = str((channel.settings or {}).get("transport") or "")
     message.status = "sent" if delivered else "failed" if transport == "mtproto" else "pending"
+    if delivered and read:
+        message.status = "read"
     message.ai_meta = {
         **message.ai_meta,
         "delivery": (
@@ -225,19 +232,22 @@ async def reply_to_conversation_with_file(
     conversation_id: UUID,
     user_id: UUID,
     text: str,
-    attachment: StoredConversationAttachment,
+    attachments: list[StoredConversationAttachment],
 ) -> ConversationActionResponse:
     caption = text.strip()
+    if not attachments:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Добавьте хотя бы один файл")
     conversation, _customer_name, channel = await _conversation_with_channel(
         session, tenant_id, conversation_id
     )
     if conversation.status == "closed":
-        delete_attachment(attachment.path)
+        for attachment in attachments:
+            delete_attachment(attachment.path)
         raise HTTPException(status.HTTP_409_CONFLICT, "Диалог закрыт")
     latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
     chat_id = _message_chat_id(latest_inbound)
     replied_at = datetime.now(UTC)
-    metadata = dict(attachment.metadata)
+    metadata_items = [dict(attachment.metadata) for attachment in attachments]
     message = Message(
         tenant_id=tenant_id,
         conversation_id=conversation.id,
@@ -245,7 +255,7 @@ async def reply_to_conversation_with_file(
         sender_type="manager",
         sender_user_id=user_id,
         text=caption,
-        attachments={"items": [dict(metadata)]},
+        attachments={"items": [dict(metadata) for metadata in metadata_items]},
         external_message_id=None,
         status="pending",
         confidence=None,
@@ -264,23 +274,38 @@ async def reply_to_conversation_with_file(
     session.add(message)
     try:
         await session.flush()
-        delivered, telegram_message_id = await _deliver_outbound_attachment(
-            channel, message, attachment.path, metadata
+        delivered, telegram_message_ids, read = await _deliver_outbound_attachments(
+            channel,
+            message,
+            [attachment.path for attachment in attachments],
+            metadata_items,
         )
         transport = str((channel.settings or {}).get("transport") or "")
         message.status = "sent" if delivered else "failed" if transport == "mtproto" else "pending"
-        if telegram_message_id is not None:
-            message.external_message_id = f"telegram:{chat_id}:{telegram_message_id}"
-            message.ai_meta = {**message.ai_meta, "telegram_message_id": telegram_message_id}
-            metadata["telegram_message_id"] = telegram_message_id
-            message.attachments = {"items": [metadata]}
+        if delivered and read:
+            message.status = "read"
+        sent_message_ids = [message_id for message_id in telegram_message_ids if message_id]
+        if sent_message_ids:
+            first_message_id = sent_message_ids[0]
+            message.external_message_id = f"telegram:{chat_id}:{first_message_id}"
+            message.ai_meta = {
+                **message.ai_meta,
+                "telegram_message_id": first_message_id,
+                "telegram_message_ids": sent_message_ids,
+            }
+            for metadata, telegram_message_id in zip(
+                metadata_items, telegram_message_ids, strict=False
+            ):
+                if telegram_message_id is not None:
+                    metadata["telegram_message_id"] = telegram_message_id
+            message.attachments = {"items": metadata_items}
         message.ai_meta = {
             **message.ai_meta,
             "delivery": "channel-sent" if delivered else "delivery-disabled",
         }
         conversation.status = "answered"
         conversation.last_message_at = replied_at
-        conversation.last_message_preview = caption[:512] or str(metadata["name"])
+        conversation.last_message_preview = caption[:512] or str(metadata_items[0]["name"])
         conversation.unread_count = 0
         await session.commit()
         if message.status == "sent" and transport == "mtproto":
@@ -288,7 +313,8 @@ async def reply_to_conversation_with_file(
         await session.refresh(message)
     except Exception:
         await session.rollback()
-        delete_attachment(attachment.path)
+        for attachment in attachments:
+            delete_attachment(attachment.path)
         raise
     thread = await get_conversation_thread(session, tenant_id, conversation.id)
     return ConversationActionResponse(
@@ -327,6 +353,11 @@ def _conversation_response(
         channel_type=channel_type,
         customer_id=conversation.customer_id,
         customer_name=customer_name,
+        avatar_url=(
+            f"/api/v1/conversations/{conversation.id}/avatar"
+            if customer_avatar_exists(conversation.tenant_id, conversation.customer_id)
+            else None
+        ),
         status=conversation.status,
         last_message_at=conversation.last_message_at,
         last_message_preview=conversation.last_message_preview,
@@ -388,13 +419,13 @@ async def _latest_inbound_message(
 async def _deliver_outbound_message(
     channel: Channel,
     message: Message,
-) -> bool:
+) -> tuple[bool, bool]:
     if channel.type != "telegram":
-        return False
+        return False, False
 
     chat_id = _message_chat_id(message)
     if not chat_id:
-        return False
+        return False, False
 
     transport = str((channel.settings or {}).get("transport") or "")
     if transport == "mtproto":
@@ -414,11 +445,11 @@ async def _deliver_outbound_message(
                 **message.ai_meta,
                 "telegram_message_id": telegram_message_id,
             }
-        return delivered
+        return delivered, bool(getattr(delivery, "read", False))
 
     delivered = await send_telegram_message(channel, chat_id, message.text)
     message.external_message_id = f"manager:{message.id}"
-    return delivered
+    return delivered, False
 
 
 async def _deliver_outbound_attachment(
@@ -426,12 +457,12 @@ async def _deliver_outbound_attachment(
     message: Message,
     file_path: Path,
     metadata: dict[str, object],
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, bool]:
     if channel.type != "telegram":
-        return False, None
+        return False, None, False
     chat_id = _message_chat_id(message)
     if not chat_id:
-        return False, None
+        return False, None, False
     is_image = metadata.get("kind") == "image"
     if (channel.settings or {}).get("transport") == "mtproto":
         raw_hash = (message.ai_meta or {}).get("peer_access_hash")
@@ -443,14 +474,43 @@ async def _deliver_outbound_attachment(
             peer_access_hash=raw_hash if isinstance(raw_hash, int) else None,
             force_document=not is_image,
         )
-        return delivery.delivered, delivery.message_id
-    return await send_telegram_file(
-        channel,
-        chat_id,
-        str(file_path),
-        message.text,
-        is_image=is_image,
+        return (
+            delivery.delivered,
+            delivery.message_id,
+            bool(getattr(delivery, "read", False)),
+        )
+    delivered, telegram_message_id = await send_telegram_file(
+        channel, chat_id, str(file_path), message.text, is_image=is_image
     )
+    return delivered, telegram_message_id, False
+
+
+async def _deliver_outbound_attachments(
+    channel: Channel,
+    message: Message,
+    file_paths: list[Path],
+    metadata_items: list[dict[str, object]],
+) -> tuple[bool, list[int | None], bool]:
+    deliveries: list[bool] = []
+    message_ids: list[int | None] = []
+    read_states: list[bool] = []
+    original_text = message.text
+    try:
+        for index, (file_path, metadata) in enumerate(
+            zip(file_paths, metadata_items, strict=True)
+        ):
+            # Telegram captions belong to an individual media item. Send the
+            # user's text once, below the ordered attachment group in our UI.
+            message.text = original_text if index == 0 else ""
+            delivered, message_id, read = await _deliver_outbound_attachment(
+                channel, message, file_path, metadata
+            )
+            deliveries.append(delivered)
+            message_ids.append(message_id)
+            read_states.append(read)
+    finally:
+        message.text = original_text
+    return all(deliveries), message_ids, bool(read_states) and all(read_states)
 
 
 def _public_attachments(message: Message) -> dict:
@@ -498,6 +558,31 @@ async def get_conversation_attachment(
                 item.get("content_type") or "application/octet-stream"
             )
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Вложение не найдено")
+
+
+async def get_conversation_avatar(
+    session: AsyncSession,
+    tenant_id: UUID,
+    conversation_id: UUID,
+) -> tuple[Path, str]:
+    result = await session.execute(
+        select(Conversation.customer_id)
+        .join(Customer, Customer.id == Conversation.customer_id)
+        .join(Channel, Channel.id == Conversation.channel_id)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.tenant_id == tenant_id,
+            Customer.tenant_id == tenant_id,
+            Channel.tenant_id == tenant_id,
+        )
+    )
+    customer_id = result.scalar_one_or_none()
+    if customer_id is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Аватар не найден")
+    avatar = get_customer_avatar(tenant_id, customer_id)
+    if avatar is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Аватар не найден")
+    return avatar
 
 
 def _message_chat_id(message: Message | None) -> str | None:

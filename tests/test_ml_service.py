@@ -138,7 +138,7 @@ async def test_ml_service_escalates_for_manager_risk_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ml_service_passes_only_last_eight_history_turns() -> None:
+async def test_ml_service_passes_all_history_turns() -> None:
     llm = CapturingLLM()
     history = tuple(ChatTurn(role="customer", text=f"Сообщение {index}") for index in range(10))
     service = MLMessageService(llm=llm)
@@ -153,8 +153,8 @@ async def test_ml_service_passes_only_last_eight_history_turns() -> None:
         )
     )
 
-    assert len(llm.history) == 8
-    assert "Сообщение 0" not in result.prompt.user_prompt
+    assert llm.history == [f"customer: Сообщение {index}" for index in range(10)]
+    assert "Сообщение 0" in result.prompt.user_prompt
     assert "Сообщение 2" in result.prompt.user_prompt
     assert "Не придумывай факты." in llm.system_prompt
 

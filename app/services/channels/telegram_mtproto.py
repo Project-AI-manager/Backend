@@ -9,17 +9,19 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient  # type: ignore[import-untyped]
+from telethon import utils as telegram_utils  # type: ignore[import-untyped]
 from telethon.errors import (  # type: ignore[import-untyped]
     FloodWaitError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
-from telethon.tl.types import InputPeerUser  # type: ignore[import-untyped]
+from telethon.tl.functions.messages import GetPeerDialogsRequest  # type: ignore[import-untyped]
+from telethon.tl.types import InputDialogPeer, InputPeerUser  # type: ignore[import-untyped]
 
 from app.core.config import settings
 from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models.channel import Channel
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.schemas.channels import (
     TelegramAccountAuthResponse,
     TelegramAccountStartResponse,
@@ -31,6 +33,7 @@ from app.services.channels.telegram import (
     _get_or_create_customer,
     process_telegram_inbound_message,
 )
+from app.services.customer_avatars import remove_customer_avatar, store_customer_avatar
 
 
 @dataclass
@@ -47,6 +50,7 @@ _pending_auth: dict[UUID, PendingTelegramAuth] = {}
 class TelegramMTProtoDelivery:
     delivered: bool
     message_id: int | None = None
+    read: bool = False
 
 
 def _application_credentials() -> tuple[int, str]:
@@ -204,6 +208,8 @@ async def send_mtproto_message(
         client = await create_authorized_client(channel)
         peer = await _resolve_peer(client, int(peer_id), peer_access_hash)
         sent = await client.send_message(peer, text)
+        message_id = getattr(sent, "id", None)
+        is_read = await _is_outgoing_message_read(client, int(peer_id), message_id)
     except FloodWaitError:
         return TelegramMTProtoDelivery(delivered=False)
     except (TypeError, ValueError) as exc:
@@ -222,10 +228,10 @@ async def send_mtproto_message(
     finally:
         if client is not None:
             await client.disconnect()
-    message_id = getattr(sent, "id", None)
     return TelegramMTProtoDelivery(
         delivered=True,
         message_id=int(message_id) if message_id is not None else None,
+        read=is_read,
     )
 
 
@@ -248,6 +254,8 @@ async def send_mtproto_file(
             caption=caption or None,
             force_document=force_document,
         )
+        message_id = getattr(sent, "id", None)
+        is_read = await _is_outgoing_message_read(client, int(peer_id), message_id)
     except FloodWaitError:
         return TelegramMTProtoDelivery(delivered=False)
     except Exception as exc:
@@ -258,11 +266,40 @@ async def send_mtproto_file(
     finally:
         if client is not None:
             await client.disconnect()
-    message_id = getattr(sent, "id", None)
     return TelegramMTProtoDelivery(
         delivered=True,
         message_id=int(message_id) if message_id is not None else None,
+        read=is_read,
     )
+
+
+async def _is_outgoing_message_read(
+    client: TelegramClient,
+    peer_id: int,
+    message_id: object,
+) -> bool:
+    """Read Telegram's authoritative outbox watermark after a send.
+
+    A second Telegram session can consume the real-time read update before the
+    listener sees it. The dialog watermark still contains the final state.
+    """
+    if not isinstance(message_id, int):
+        return False
+    try:
+        async for dialog in client.iter_dialogs():
+            if int(dialog.id) != peer_id:
+                continue
+            raw_watermark = getattr(
+                getattr(dialog, "dialog", None),
+                "read_outbox_max_id",
+                0,
+            )
+            return isinstance(raw_watermark, int) and raw_watermark >= message_id
+    except Exception:
+        # Delivery already succeeded, so a receipt lookup must not turn it into
+        # a transport failure. The long-running listener can still update it.
+        return False
+    return False
 
 
 async def _resolve_peer(
@@ -300,6 +337,10 @@ async def ingest_mtproto_message(
         attachments={},
     )
     customer = await _get_or_create_customer(session, channel, normalized)
+    if inbound.avatar_bytes is not None:
+        store_customer_avatar(channel.tenant_id, customer.id, inbound.avatar_bytes)
+    elif inbound.avatar_checked:
+        remove_customer_avatar(channel.tenant_id, customer.id)
     conversation = await _get_or_create_conversation(session, channel, customer, normalized)
     existing = await session.execute(
         select(Message).where(
@@ -337,6 +378,56 @@ async def ingest_mtproto_message(
     return conversation.id
 
 
+async def sync_mtproto_customer_avatars(
+    session: AsyncSession,
+    channel: Channel,
+    client: TelegramClient,
+) -> int:
+    """Backfill avatars for customers already known on an MTProto channel.
+
+    Telegram remains the source of truth. A failed download preserves the last
+    cached image; a successful lookup with no profile photo removes stale data.
+    """
+    result = await session.execute(
+        select(Customer.id, CustomerIdentity.external_user_id)
+        .join(CustomerIdentity, CustomerIdentity.customer_id == Customer.id)
+        .where(
+            Customer.tenant_id == channel.tenant_id,
+            CustomerIdentity.channel_id == channel.id,
+        )
+    )
+    customers_by_external_id = {
+        str(external_user_id): customer_id for customer_id, external_user_id in result.all()
+    }
+    if not customers_by_external_id:
+        return 0
+
+    changed = 0
+    async for dialog in client.iter_dialogs():
+        customer_id = customers_by_external_id.get(str(getattr(dialog, "id", "")))
+        if customer_id is None:
+            continue
+        entity = getattr(dialog, "entity", None)
+        if entity is None:
+            continue
+        try:
+            if getattr(entity, "photo", None) is None:
+                remove_customer_avatar(channel.tenant_id, customer_id)
+                changed += 1
+                continue
+            downloaded = await client.download_profile_photo(entity, file=bytes)
+            if isinstance(downloaded, bytes) and store_customer_avatar(
+                channel.tenant_id,
+                customer_id,
+                downloaded,
+            ):
+                changed += 1
+        except Exception:
+            # Avatar refresh must never stop message ingestion.
+            continue
+    return changed
+
+
 async def mark_mtproto_messages_read(
     session: AsyncSession,
     channel_id: UUID,
@@ -345,16 +436,89 @@ async def mark_mtproto_messages_read(
     max_message_id: int,
 ) -> int:
     """Persist Telegram's read watermark and mark all matching outgoing messages read."""
+    return await _mark_mtproto_read_watermarks(
+        session,
+        channel_id,
+        {peer_id: max_message_id},
+    )
+
+
+async def reconcile_mtproto_messages_read(
+    session: AsyncSession,
+    channel_id: UUID,
+    client: TelegramClient,
+) -> int:
+    """Recover read receipts that were missed while the listener was offline.
+
+    Telegram read updates are transient. In addition, replies are sent through a
+    short-lived MTProto connection, so the long-running listener is not guaranteed
+    to observe every ``UpdateReadHistoryOutbox`` update. The dialog read watermark
+    is durable on Telegram and lets us reconcile those missed updates.
+    """
+    result = await session.execute(
+        select(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Conversation.channel_id == channel_id,
+            Message.direction == "outbound",
+            Message.status == "sent",
+        )
+    )
+    peer_access_hashes: dict[int, int | None] = {}
+    for message in result.scalars().all():
+        metadata = message.ai_meta or {}
+        raw_peer_id = metadata.get("chat_id")
+        try:
+            peer_id = int(raw_peer_id)
+        except (TypeError, ValueError):
+            continue
+        raw_access_hash = metadata.get("peer_access_hash")
+        peer_access_hashes[peer_id] = (
+            raw_access_hash if isinstance(raw_access_hash, int) else None
+        )
+
+    if not peer_access_hashes:
+        return 0
+
+    input_peers: list[InputDialogPeer] = []
+    for peer_id, access_hash in peer_access_hashes.items():
+        try:
+            peer = await _resolve_peer(client, peer_id, access_hash)
+        except (TypeError, ValueError):
+            continue
+        input_peers.append(InputDialogPeer(peer))
+
+    watermarks: dict[int, int] = {}
+    for start in range(0, len(input_peers), 100):
+        dialogs = await client(GetPeerDialogsRequest(peers=input_peers[start : start + 100]))
+        for dialog in dialogs.dialogs:
+            max_id = getattr(dialog, "read_outbox_max_id", None)
+            peer = getattr(dialog, "peer", None)
+            if not isinstance(max_id, int) or peer is None:
+                continue
+            peer_id = int(telegram_utils.get_peer_id(peer))
+            if peer_id in peer_access_hashes:
+                watermarks[peer_id] = max_id
+
+    return await _mark_mtproto_read_watermarks(session, channel_id, watermarks)
+
+
+async def _mark_mtproto_read_watermarks(
+    session: AsyncSession,
+    channel_id: UUID,
+    new_watermarks: dict[int, int],
+) -> int:
     channel = await session.get(Channel, channel_id)
     if channel is None:
         return 0
     settings_json = channel.settings or {}
     raw_watermarks = settings_json.get("read_watermarks")
     watermarks = dict(raw_watermarks) if isinstance(raw_watermarks, dict) else {}
-    watermark_key = str(peer_id)
-    previous = watermarks.get(watermark_key)
-    previous_id = previous if isinstance(previous, int) else 0
-    watermarks[watermark_key] = max(previous_id, max_message_id)
+    for peer_id, max_message_id in new_watermarks.items():
+        watermark_key = str(peer_id)
+        previous = watermarks.get(watermark_key)
+        previous_id = previous if isinstance(previous, int) else 0
+        watermarks[watermark_key] = max(previous_id, max_message_id)
     channel.settings = {**settings_json, "read_watermarks": watermarks}
 
     result = await session.execute(
@@ -370,7 +534,9 @@ async def mark_mtproto_messages_read(
     for message in result.scalars().all():
         metadata = message.ai_meta or {}
         telegram_message_id = metadata.get("telegram_message_id")
-        if str(metadata.get("chat_id") or "") != str(peer_id):
+        try:
+            max_message_id = new_watermarks[int(metadata.get("chat_id"))]
+        except (KeyError, TypeError, ValueError):
             continue
         if not isinstance(telegram_message_id, int) or telegram_message_id > max_message_id:
             continue
