@@ -1,6 +1,7 @@
 """Команда и профиль. Экраны: /settings/team, /profile."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import cast
 
 from fastapi import APIRouter, HTTPException, status
@@ -11,6 +12,7 @@ from app.models.user import User, UserNotificationSettings
 from app.schemas.auth import (
     NotificationSettingsResponse,
     NotificationSettingsUpdate,
+    OnboardingStatusResponse,
     UserMeResponse,
 )
 
@@ -56,7 +58,20 @@ async def me(user: CurrentUser, session: SessionDep) -> UserMeResponse:
         role=db_user.role,
         status=db_user.status,
         email_verified=db_user.email_verified_at is not None,
+        onboarding_seen=db_user.onboarding_seen_at is not None,
     )
+
+
+@router.post("/me/onboarding/seen", response_model=OnboardingStatusResponse)
+async def mark_onboarding_seen(
+    user: CurrentUser,
+    session: SessionDep,
+) -> OnboardingStatusResponse:
+    db_user = _active_db_user(user)
+    if db_user.onboarding_seen_at is None:
+        db_user.onboarding_seen_at = datetime.now(UTC)
+        await session.commit()
+    return OnboardingStatusResponse(onboarding_seen=True)
 
 
 @router.get("", response_model=list[UserMeResponse])
@@ -77,6 +92,7 @@ async def list_team(user: AdminUser, session: SessionDep) -> list[UserMeResponse
             role=db_user.role,
             status=db_user.status,
             email_verified=db_user.email_verified_at is not None,
+            onboarding_seen=db_user.onboarding_seen_at is not None,
         )
         for db_user in result.scalars().all()
     ]

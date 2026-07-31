@@ -80,7 +80,19 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        production_frontends = [
+            "https://frontend-nine-mu-rjbjzqe6rq.vercel.app",
+            "https://frontend-timurzakirov239s-projects.vercel.app",
+            "https://frontend-git-main-timurzakirov239s-projects.vercel.app",
+            "https://автопилот.space",
+            "https://xn--80aesmncewf.space",
+            "https://www.xn--80aesmncewf.space",
+        ]
+        for origin in production_frontends:
+            if origin not in origins:
+                origins.append(origin)
+        return origins
 
     @property
     def is_local_or_test(self) -> bool:

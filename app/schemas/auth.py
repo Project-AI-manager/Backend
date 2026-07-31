@@ -62,6 +62,11 @@ class UserMeResponse(BaseModel):
     role: str
     status: str
     email_verified: bool = False
+    onboarding_seen: bool = False
+
+
+class OnboardingStatusResponse(BaseModel):
+    onboarding_seen: bool
 
 
 class NotificationSettingsResponse(BaseModel):

@@ -89,6 +89,23 @@ def test_register_returns_tokens_and_me_profile(client: TestClient) -> None:
     assert data["full_name"] == "Тимур"
     assert data["role"] == "owner"
     assert data["tenant_id"]
+    assert data["onboarding_seen"] is False
+
+
+def test_onboarding_is_marked_seen_once_for_the_current_user(client: TestClient) -> None:
+    tokens = register(client)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    first = client.post("/api/v1/users/me/onboarding/seen", headers=headers)
+    second = client.post("/api/v1/users/me/onboarding/seen", headers=headers)
+    profile = client.get("/api/v1/users/me", headers=headers)
+
+    assert first.status_code == 200
+    assert first.json() == {"onboarding_seen": True}
+    assert second.status_code == 200
+    assert second.json() == {"onboarding_seen": True}
+    assert profile.status_code == 200
+    assert profile.json()["onboarding_seen"] is True
 
 
 def test_register_uses_runtime_ai_defaults(
