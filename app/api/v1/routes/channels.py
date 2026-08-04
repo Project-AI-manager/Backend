@@ -17,6 +17,8 @@ from app.schemas.channels import (
     TelegramAccountPasswordRequest,
     TelegramAccountStartRequest,
     TelegramAccountStartResponse,
+    TelegramQRStartResponse,
+    TelegramQRStatusResponse,
 )
 from app.services.channels.telegram import (
     connect_channel as connect_channel_service,
@@ -31,7 +33,9 @@ from app.services.channels.telegram import process_telegram_webhook
 from app.services.channels.telegram_mtproto import (
     confirm_account_code,
     confirm_account_password,
+    get_qr_account_connection_status,
     start_account_connection,
+    start_qr_account_connection,
 )
 
 router = APIRouter()
@@ -44,6 +48,30 @@ async def start_telegram_account(
     session: SessionDep,
 ) -> TelegramAccountStartResponse:
     return await start_account_connection(session, tenant_id_from_user(user), body.phone)
+
+
+@router.post("/telegram/account/qr/start", response_model=TelegramQRStartResponse)
+async def start_telegram_qr_account(
+    user: AdminUser,
+    session: SessionDep,
+) -> TelegramQRStartResponse:
+    return await start_qr_account_connection(session, tenant_id_from_user(user))
+
+
+@router.get(
+    "/telegram/account/qr/{channel_id}/status",
+    response_model=TelegramQRStatusResponse,
+)
+async def telegram_qr_account_status(
+    channel_id: uuid.UUID,
+    user: AdminUser,
+    session: SessionDep,
+) -> TelegramQRStatusResponse:
+    return await get_qr_account_connection_status(
+        session,
+        tenant_id_from_user(user),
+        channel_id,
+    )
 
 
 @router.post("/telegram/account/confirm", response_model=TelegramAccountAuthResponse)

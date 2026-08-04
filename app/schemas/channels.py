@@ -43,6 +43,23 @@ class TelegramAccountStartRequest(BaseModel):
 class TelegramAccountStartResponse(BaseModel):
     channel_id: UUID
     status: Literal["code_required", "active"]
+    delivery_method: Literal["app", "sms", "call", "email", "other"] = "other"
+    next_delivery_method: Literal["app", "sms", "call", "email", "other"] | None = None
+    timeout_seconds: int | None = None
+    phone_masked: str = ""
+
+
+class TelegramQRStartResponse(BaseModel):
+    channel_id: UUID
+    status: Literal["waiting"] = "waiting"
+    qr_url: str
+    expires_at: datetime
+
+
+class TelegramQRStatusResponse(BaseModel):
+    channel_id: UUID
+    status: Literal["waiting", "password_required", "active", "expired"]
+    display_name: str = ""
 
 
 class TelegramAccountConfirmRequest(BaseModel):

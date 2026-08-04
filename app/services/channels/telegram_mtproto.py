@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -12,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient  # type: ignore[import-untyped]
 from telethon import utils as telegram_utils  # type: ignore[import-untyped]
 from telethon.errors import (  # type: ignore[import-untyped]
+    ApiIdInvalidError,
+    ApiIdPublishedFloodError,
     FloodWaitError,
+    PhoneNumberBannedError,
+    PhoneNumberFloodError,
+    PhoneNumberInvalidError,
+    PhonePasswordFloodError,
+    SendCodeUnavailableError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
@@ -27,6 +35,8 @@ from app.schemas.channels import (
     TelegramAccountAuthResponse,
     TelegramAccountStartResponse,
     TelegramMTProtoInbound,
+    TelegramQRStartResponse,
+    TelegramQRStatusResponse,
 )
 from app.services.channels.base import NormalizedMessage
 from app.services.channels.telegram import (
@@ -44,7 +54,15 @@ class PendingTelegramAuth:
     phone_code_hash: str
 
 
+@dataclass
+class PendingTelegramQRAuth:
+    client: TelegramClient
+    login_task: asyncio.Task[object]
+
+
 _pending_auth: dict[UUID, PendingTelegramAuth] = {}
+_pending_qr_auth: dict[UUID, PendingTelegramQRAuth] = {}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,6 +77,11 @@ async def cancel_pending_account_connection(channel_id: UUID) -> None:
     pending = _pending_auth.pop(channel_id, None)
     if pending is not None:
         await pending.client.disconnect()
+    qr_pending = _pending_qr_auth.pop(channel_id, None)
+    if qr_pending is not None:
+        if not qr_pending.login_task.done():
+            qr_pending.login_task.cancel()
+        await qr_pending.client.disconnect()
 
 
 def _application_credentials() -> tuple[int, str]:
@@ -76,21 +99,19 @@ async def start_account_connection(
     phone: str,
 ) -> TelegramAccountStartResponse:
     api_id, api_hash = _application_credentials()
-    normalized_phone = phone.strip()
-    channel = await _tenant_telegram_channel(session, tenant_id)
-    if channel is None:
-        channel = Channel(
-            tenant_id=tenant_id,
-            type="telegram",
-            name="Telegram account",
-            status="disabled",
-            credentials_encrypted="",
-            settings={},
-        )
-        session.add(channel)
-        await session.flush()
+    normalized_phone = _normalize_phone(phone)
+    channel = await _get_or_create_mtproto_channel(session, tenant_id)
 
-    client = TelegramClient(StringSession(), api_id, api_hash)
+    pending = _pending_auth.get(channel.id)
+    if pending is not None and pending.phone != normalized_phone:
+        await cancel_pending_account_connection(channel.id)
+        pending = None
+
+    client = (
+        pending.client
+        if pending is not None
+        else TelegramClient(StringSession(), api_id, api_hash)
+    )
     try:
         await client.connect()
         sent = await client.send_code_request(normalized_phone)
@@ -99,6 +120,36 @@ async def start_account_connection(
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"Telegram requires waiting {exc.seconds} seconds",
+        ) from exc
+    except PhoneNumberInvalidError as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Telegram phone number is invalid",
+        ) from exc
+    except PhoneNumberBannedError as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This phone number is banned by Telegram",
+        ) from exc
+    except (PhoneNumberFloodError, PhonePasswordFloodError) as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Telegram temporarily blocked login attempts for this phone number",
+        ) from exc
+    except (ApiIdInvalidError, ApiIdPublishedFloodError) as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Telegram application credentials are invalid or restricted",
+        ) from exc
+    except SendCodeUnavailableError as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Telegram cannot deliver a login code to this number right now",
         ) from exc
     except Exception as exc:
         await client.disconnect()
@@ -110,9 +161,131 @@ async def start_account_connection(
         phone_code_hash=sent.phone_code_hash,
     )
     channel.status = "disabled"
-    channel.settings = {"auth_status": "code_required", "phone_masked": _mask_phone(phone)}
+    delivery_method = _delivery_method(getattr(sent, "type", None))
+    next_delivery_method = _delivery_method(getattr(sent, "next_type", None), optional=True)
+    timeout_seconds = getattr(sent, "timeout", None)
+    masked_phone = _mask_phone(normalized_phone)
+    logger.info(
+        "Telegram accepted login code request tenant=%s channel=%s phone=%s "
+        "delivery=%s next=%s timeout=%s",
+        tenant_id,
+        channel.id,
+        masked_phone,
+        delivery_method,
+        next_delivery_method,
+        timeout_seconds,
+    )
+    channel.settings = {
+        "auth_status": "code_required",
+        "phone_masked": masked_phone,
+        "transport": "mtproto",
+        "code_delivery": delivery_method,
+        "code_next_delivery": next_delivery_method,
+        "code_resend_after": timeout_seconds,
+    }
     await session.commit()
-    return TelegramAccountStartResponse(channel_id=channel.id, status="code_required")
+    return TelegramAccountStartResponse(
+        channel_id=channel.id,
+        status="code_required",
+        delivery_method=delivery_method,
+        next_delivery_method=next_delivery_method,
+        timeout_seconds=timeout_seconds,
+        phone_masked=masked_phone,
+    )
+
+
+async def start_qr_account_connection(
+    session: AsyncSession,
+    tenant_id: UUID,
+) -> TelegramQRStartResponse:
+    api_id, api_hash = _application_credentials()
+    channel = await _get_or_create_mtproto_channel(session, tenant_id)
+    await cancel_pending_account_connection(channel.id)
+
+    client = TelegramClient(StringSession(), api_id, api_hash)
+    try:
+        await client.connect()
+        qr_login = await client.qr_login()
+    except (ApiIdInvalidError, ApiIdPublishedFloodError) as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Telegram application credentials are invalid or restricted",
+        ) from exc
+    except Exception as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Telegram QR authorization could not be started",
+        ) from exc
+
+    _pending_qr_auth[channel.id] = PendingTelegramQRAuth(
+        client=client,
+        login_task=asyncio.create_task(qr_login.wait()),
+    )
+    channel.status = "disabled"
+    channel.settings = {
+        "auth_status": "qr_waiting",
+        "transport": "mtproto",
+        "qr_expires_at": qr_login.expires.isoformat(),
+    }
+    await session.commit()
+    return TelegramQRStartResponse(
+        channel_id=channel.id,
+        qr_url=qr_login.url,
+        expires_at=qr_login.expires,
+    )
+
+
+async def get_qr_account_connection_status(
+    session: AsyncSession,
+    tenant_id: UUID,
+    channel_id: UUID,
+) -> TelegramQRStatusResponse:
+    channel = await _owned_channel(session, tenant_id, channel_id)
+    pending = _pending_qr_auth.get(channel.id)
+    if pending is None:
+        if channel.status == "active":
+            return TelegramQRStatusResponse(
+                channel_id=channel.id,
+                status="active",
+                display_name=channel.name,
+            )
+        raise HTTPException(status.HTTP_409_CONFLICT, "Telegram QR authorization expired")
+
+    await asyncio.sleep(0)
+    if not pending.login_task.done():
+        return TelegramQRStatusResponse(channel_id=channel.id, status="waiting")
+
+    try:
+        pending.login_task.result()
+    except SessionPasswordNeededError:
+        channel.settings = {**channel.settings, "auth_status": "password_required"}
+        await session.commit()
+        return TelegramQRStatusResponse(
+            channel_id=channel.id,
+            status="password_required",
+        )
+    except TimeoutError:
+        _pending_qr_auth.pop(channel.id, None)
+        await pending.client.disconnect()
+        channel.settings = {**channel.settings, "auth_status": "qr_expired"}
+        await session.commit()
+        return TelegramQRStatusResponse(channel_id=channel.id, status="expired")
+    except Exception as exc:
+        _pending_qr_auth.pop(channel.id, None)
+        await pending.client.disconnect()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Telegram QR authorization failed",
+        ) from exc
+
+    auth = await _complete_auth(session, channel, pending.client)
+    return TelegramQRStatusResponse(
+        channel_id=auth.channel_id,
+        status="active",
+        display_name=auth.display_name,
+    )
 
 
 async def confirm_account_code(
@@ -183,6 +356,7 @@ async def _complete_auth(
     }
     await session.commit()
     _pending_auth.pop(channel.id, None)
+    _pending_qr_auth.pop(channel.id, None)
     await client.disconnect()
     return TelegramAccountAuthResponse(
         channel_id=channel.id,
@@ -588,7 +762,9 @@ async def apply_mtproto_read_watermark(
 
 async def _tenant_telegram_channel(session: AsyncSession, tenant_id: UUID) -> Channel | None:
     result = await session.execute(
-        select(Channel).where(Channel.tenant_id == tenant_id, Channel.type == "telegram")
+        select(Channel)
+        .where(Channel.tenant_id == tenant_id, Channel.type == "telegram")
+        .order_by(Channel.updated_at.desc())
     )
     channels = list(result.scalars())
     return next(
@@ -596,10 +772,32 @@ async def _tenant_telegram_channel(session: AsyncSession, tenant_id: UUID) -> Ch
             channel
             for channel in channels
             if channel.settings.get("transport") == "mtproto"
+            or channel.settings.get("auth_status")
+            in {"code_required", "password_required", "qr_waiting", "qr_expired"}
             or channel.settings.get("sync_status") == "demo"
         ),
         None,
     )
+
+
+async def _get_or_create_mtproto_channel(
+    session: AsyncSession,
+    tenant_id: UUID,
+) -> Channel:
+    channel = await _tenant_telegram_channel(session, tenant_id)
+    if channel is not None:
+        return channel
+    channel = Channel(
+        tenant_id=tenant_id,
+        type="telegram",
+        name="Telegram account",
+        status="disabled",
+        credentials_encrypted="",
+        settings={},
+    )
+    session.add(channel)
+    await session.flush()
+    return channel
 
 
 async def _owned_channel(session: AsyncSession, tenant_id: UUID, channel_id: UUID) -> Channel:
@@ -610,5 +808,30 @@ async def _owned_channel(session: AsyncSession, tenant_id: UUID, channel_id: UUI
 
 
 def _mask_phone(phone: str) -> str:
-    value = phone.strip()
+    value = telegram_utils.parse_phone(phone) or phone.strip()
     return f"***{value[-4:]}" if len(value) >= 4 else "***"
+
+
+def _normalize_phone(phone: str) -> str:
+    parsed = telegram_utils.parse_phone(phone)
+    if parsed is None or len(parsed) < 8:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Enter a valid phone number in international format",
+        )
+    return f"+{parsed}"
+
+
+def _delivery_method(value: object, *, optional: bool = False) -> str | None:
+    if value is None:
+        return None if optional else "other"
+    name = value.__class__.__name__.lower()
+    if "app" in name:
+        return "app"
+    if "sms" in name or "fragment" in name or "firebase" in name:
+        return "sms"
+    if "call" in name:
+        return "call"
+    if "email" in name:
+        return "email"
+    return "other"

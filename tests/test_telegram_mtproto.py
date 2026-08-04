@@ -111,7 +111,12 @@ def test_personal_account_otp_flow(
 
         async def send_code_request(self, phone: str) -> object:
             assert phone == "+79990001122"
-            return SimpleNamespace(phone_code_hash="code-hash")
+            return SimpleNamespace(
+                phone_code_hash="code-hash",
+                type=SimpleNamespace(__class__=SimpleNamespace(__name__="SentCodeTypeApp")),
+                next_type=None,
+                timeout=60,
+            )
 
         async def sign_in(self, **kwargs: object) -> None:
             assert kwargs["code"] == "12345"
@@ -131,6 +136,8 @@ def test_personal_account_otp_flow(
     )
     assert started.status_code == 200, started.text
     assert started.json()["status"] == "code_required"
+    assert started.json()["timeout_seconds"] == 60
+    assert started.json()["phone_masked"] == "***1122"
 
     confirmed = client.post(
         "/api/v1/channels/telegram/account/confirm",
@@ -152,6 +159,194 @@ def test_personal_account_otp_flow(
     assert channel.settings["phone_masked"] == "***1122"
     assert channel.credentials_encrypted.startswith("fernet:")
     assert "serialized-session" not in channel.credentials_encrypted
+
+
+def test_repeated_code_request_reuses_pending_channel_and_normalizes_phone(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    created_clients: list[FakeClient] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object) -> None:
+            self.phones: list[str] = []
+            created_clients.append(self)
+
+        async def connect(self) -> None: ...
+
+        async def disconnect(self) -> None: ...
+
+        async def send_code_request(self, phone: str) -> object:
+            self.phones.append(phone)
+            return SimpleNamespace(
+                phone_code_hash=f"hash-{len(self.phones)}",
+                type=SimpleNamespace(),
+                next_type=None,
+                timeout=30,
+            )
+
+    monkeypatch.setattr(telegram_mtproto, "TelegramClient", FakeClient)
+    telegram_mtproto._pending_auth.clear()
+
+    first = client.post(
+        "/api/v1/channels/telegram/account/start",
+        headers=headers(),
+        json={"phone": "+7 (999) 000-11-22"},
+    )
+    second = client.post(
+        "/api/v1/channels/telegram/account/start",
+        headers=headers(),
+        json={"phone": "+7 999 000 11 22"},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert second.json()["channel_id"] == first.json()["channel_id"]
+    assert len(created_clients) == 1
+    assert created_clients[0].phones == ["+79990001122", "+79990001122"]
+
+    async def channel_count() -> int:
+        async with session_factory() as session:
+            result = await session.execute(select(Channel))
+            return len(result.scalars().all())
+
+    assert asyncio.run(channel_count()) == 1
+    telegram_mtproto._pending_auth.clear()
+
+
+def test_new_phone_reuses_channel_but_starts_a_fresh_telegram_session(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    created_clients: list[FakeClient] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object) -> None:
+            self.disconnected = False
+            created_clients.append(self)
+
+        async def connect(self) -> None: ...
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+        async def send_code_request(self, _phone: str) -> object:
+            return SimpleNamespace(
+                phone_code_hash="hash",
+                type=SimpleNamespace(),
+                next_type=None,
+                timeout=30,
+            )
+
+    monkeypatch.setattr(telegram_mtproto, "TelegramClient", FakeClient)
+    telegram_mtproto._pending_auth.clear()
+
+    first = client.post(
+        "/api/v1/channels/telegram/account/start",
+        headers=headers(),
+        json={"phone": "+79990001122"},
+    )
+    second = client.post(
+        "/api/v1/channels/telegram/account/start",
+        headers=headers(),
+        json={"phone": "+6285219134757"},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert second.json()["channel_id"] == first.json()["channel_id"]
+    assert len(created_clients) == 2
+    assert created_clients[0].disconnected is True
+
+    async def channel_count() -> int:
+        async with session_factory() as session:
+            result = await session.execute(select(Channel))
+            return len(result.scalars().all())
+
+    assert asyncio.run(channel_count()) == 1
+    telegram_mtproto._pending_auth.clear()
+
+
+def test_qr_account_flow_completes_without_phone_code(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.channels import telegram_mtproto
+
+    allow_login = asyncio.Event()
+
+    class FakeSession:
+        def save(self) -> str:
+            return "qr-serialized-session"
+
+    class FakeQRLogin:
+        url = "tg://login?token=safe-token"
+        expires = datetime.now(UTC) + timedelta(minutes=1)
+
+        async def wait(self) -> object:
+            await allow_login.wait()
+            return SimpleNamespace(id=88)
+
+    class FakeClient:
+        session = FakeSession()
+
+        def __init__(self, *_args: object) -> None: ...
+
+        async def connect(self) -> None: ...
+
+        async def disconnect(self) -> None: ...
+
+        async def qr_login(self) -> FakeQRLogin:
+            return FakeQRLogin()
+
+        async def get_me(self) -> object:
+            return SimpleNamespace(
+                id=88,
+                first_name="QR",
+                last_name="Account",
+                username="qr_account",
+            )
+
+    monkeypatch.setattr(telegram_mtproto, "TelegramClient", FakeClient)
+    telegram_mtproto._pending_qr_auth.clear()
+
+    async def run_flow() -> tuple[object, object, object, Channel]:
+        async with session_factory() as session:
+            started = await telegram_mtproto.start_qr_account_connection(session, TENANT_ID)
+            waiting = await telegram_mtproto.get_qr_account_connection_status(
+                session,
+                TENANT_ID,
+                started.channel_id,
+            )
+            allow_login.set()
+            await asyncio.sleep(0)
+            completed = await telegram_mtproto.get_qr_account_connection_status(
+                session,
+                TENANT_ID,
+                started.channel_id,
+            )
+            result = await session.execute(select(Channel))
+            return started, waiting, completed, result.scalar_one()
+
+    started, waiting, completed, channel = asyncio.run(run_flow())
+    assert started.status == "waiting"
+    assert started.qr_url.startswith("tg://login?token=")
+    assert waiting.status == "waiting"
+    assert completed.status == "active"
+    assert completed.display_name == "QR Account"
+    assert channel.status == "active"
+    assert channel.settings["transport"] == "mtproto"
+    assert channel.credentials_encrypted.startswith("fernet:")
+    telegram_mtproto._pending_qr_auth.clear()
 
 
 def test_personal_account_requires_application_credentials(
