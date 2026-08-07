@@ -1,4 +1,5 @@
 """Агрегация роутеров API v1."""
+
 from fastapi import APIRouter
 
 from app.api.v1.routes import (

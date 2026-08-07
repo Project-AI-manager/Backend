@@ -213,9 +213,7 @@ async def _channels(
     return {item.id: item for item in result.scalars().all()}
 
 
-async def _identities(
-    session: SessionDep, customer_ids: set[UUID]
-) -> dict[UUID, str]:
+async def _identities(session: SessionDep, customer_ids: set[UUID]) -> dict[UUID, str]:
     if not customer_ids:
         return {}
     result = await session.execute(
@@ -352,12 +350,23 @@ def _build_analytics_workbook(
     _write_sheet(
         daily,
         [
-            "Дата", "Уникальные клиенты", "Активные диалоги", "Сообщения клиентов",
-            "Ответы Автопилота", "Ответы менеджеров", "Всего сообщений",
-            "AI-ответов с токенами", "Статус данных по токенам", "Input tokens",
-            "Cached input tokens", "Cache write tokens", "Reasoning tokens",
-            "Output tokens (включая reasoning)", "Всего токенов",
-            "Себестоимость API, ₽", "Списание клиенту, ₽",
+            "Дата",
+            "Уникальные клиенты",
+            "Активные диалоги",
+            "Сообщения клиентов",
+            "Ответы Автопилота",
+            "Ответы менеджеров",
+            "Всего сообщений",
+            "AI-ответов с токенами",
+            "Статус данных по токенам",
+            "Input tokens",
+            "Cached input tokens",
+            "Cache write tokens",
+            "Reasoning tokens",
+            "Output tokens (включая reasoning)",
+            "Всего токенов",
+            "Себестоимость API, ₽",
+            "Списание клиенту, ₽",
         ],
         daily_rows,
         date_columns={1},
@@ -374,6 +383,7 @@ def _build_analytics_workbook(
 
     customers_sheet = workbook.create_sheet("Клиенты")
     customer_rows = []
+
     def customer_name(value: UUID) -> str:
         item = customers.get(value)
         return item.display_name if item else ""
@@ -415,11 +425,26 @@ def _build_analytics_workbook(
     _write_sheet(
         customers_sheet,
         [
-            "Customer ID", "Клиент", "ID в канале", "Каналы", "Диалоги",
-            "Первое сообщение", "Последнее сообщение", "Входящие", "AI",
-            "Менеджеры", "Всего сообщений", "Статус данных по токенам", "Input",
-            "Cached", "Cache write", "Reasoning", "Output", "Всего токенов",
-            "Себестоимость, ₽", "Списание, ₽",
+            "Customer ID",
+            "Клиент",
+            "ID в канале",
+            "Каналы",
+            "Диалоги",
+            "Первое сообщение",
+            "Последнее сообщение",
+            "Входящие",
+            "AI",
+            "Менеджеры",
+            "Всего сообщений",
+            "Статус данных по токенам",
+            "Input",
+            "Cached",
+            "Cache write",
+            "Reasoning",
+            "Output",
+            "Всего токенов",
+            "Себестоимость, ₽",
+            "Списание, ₽",
         ],
         customer_rows,
         datetime_columns={6, 7},
@@ -433,9 +458,7 @@ def _build_analytics_workbook(
         thread = by_conversation.get(conversation.id, [])
         conversation_usage = usage_by_conversation.get(conversation.id, [])
         conversation_ai_messages = [m for m in thread if m.sender_type == "ai"]
-        conversation_coverage = _token_coverage(
-            conversation_ai_messages, conversation_usage
-        )
+        conversation_coverage = _token_coverage(conversation_ai_messages, conversation_usage)
         conversation_token_values = _daily_token_values(
             conversation_ai_messages, conversation_usage
         )
@@ -444,13 +467,17 @@ def _build_analytics_workbook(
         channel = channels.get(conversation.channel_id)
         conversation_rows.append(
             [
-                str(conversation.id), str(conversation.customer_id),
-                customer.display_name if customer else "", channel.type if channel else "",
-                conversation.status, min((m.created_at for m in thread), default=None),
+                str(conversation.id),
+                str(conversation.customer_id),
+                customer.display_name if customer else "",
+                channel.type if channel else "",
+                conversation.status,
+                min((m.created_at for m in thread), default=None),
                 max((m.created_at for m in thread), default=None),
                 sum(m.direction == "inbound" for m in thread),
                 len(conversation_ai_messages),
-                sum(m.sender_type == "manager" for m in thread), len(thread),
+                sum(m.sender_type == "manager" for m in thread),
+                len(thread),
                 round(sum(confidence) / len(confidence), 4) if confidence else None,
                 ", ".join(sorted({u.model for u in conversation_usage if u.model})),
                 conversation_coverage.label,
@@ -460,11 +487,28 @@ def _build_analytics_workbook(
     _write_sheet(
         conversations_sheet,
         [
-            "Conversation ID", "Customer ID", "Клиент", "Канал", "Статус",
-            "Начало активности", "Конец активности", "Входящие", "AI", "Менеджеры",
-            "Всего сообщений", "Средняя уверенность", "Модели",
-            "Статус данных по токенам", "Input", "Cached", "Cache write", "Reasoning",
-            "Output", "Всего токенов", "Себестоимость, ₽", "Списание, ₽",
+            "Conversation ID",
+            "Customer ID",
+            "Клиент",
+            "Канал",
+            "Статус",
+            "Начало активности",
+            "Конец активности",
+            "Входящие",
+            "AI",
+            "Менеджеры",
+            "Всего сообщений",
+            "Средняя уверенность",
+            "Модели",
+            "Статус данных по токенам",
+            "Input",
+            "Cached",
+            "Cache write",
+            "Reasoning",
+            "Output",
+            "Всего токенов",
+            "Себестоимость, ₽",
+            "Списание, ₽",
         ],
         conversation_rows,
         datetime_columns={6, 7},
@@ -481,24 +525,27 @@ def _build_analytics_workbook(
         for message in messages:
             message_conversation = conversation_map.get(message.conversation_id)
             customer = (
-                customers.get(message_conversation.customer_id)
-                if message_conversation
-                else None
+                customers.get(message_conversation.customer_id) if message_conversation else None
             )
             channel = (
-                channels.get(message_conversation.channel_id)
-                if message_conversation
-                else None
+                channels.get(message_conversation.channel_id) if message_conversation else None
             )
             usage_event = usage_by_message.get(message.id)
             usage_values = _usage_values_for_message(message, usage_event)
             message_rows.append(
                 [
-                    message.created_at, str(message.id), str(message.conversation_id),
+                    message.created_at,
+                    str(message.id),
+                    str(message.conversation_id),
                     str(message_conversation.customer_id) if message_conversation else "",
-                    customer.display_name if customer else "", channel.type if channel else "",
-                    message.direction, message.sender_type, message.text,
-                    _attachment_names(message.attachments), message.status, message.confidence,
+                    customer.display_name if customer else "",
+                    channel.type if channel else "",
+                    message.direction,
+                    message.sender_type,
+                    message.text,
+                    _attachment_names(message.attachments),
+                    message.status,
+                    message.confidence,
                     str((message.ai_meta or {}).get("decision") or ""),
                     usage_event.provider
                     if usage_event
@@ -512,11 +559,29 @@ def _build_analytics_workbook(
         _write_sheet(
             messages_sheet,
             [
-                "Дата и время", "Message ID", "Conversation ID", "Customer ID", "Клиент",
-                "Канал", "Направление", "Отправитель", "Сообщение", "Вложения",
-                "Доставка", "Уверенность", "Решение", "Provider", "Модель", "Input",
-                "Cached", "Cache write", "Reasoning", "Output", "Всего токенов",
-                "Себестоимость, ₽", "Списание, ₽",
+                "Дата и время",
+                "Message ID",
+                "Conversation ID",
+                "Customer ID",
+                "Клиент",
+                "Канал",
+                "Направление",
+                "Отправитель",
+                "Сообщение",
+                "Вложения",
+                "Доставка",
+                "Уверенность",
+                "Решение",
+                "Provider",
+                "Модель",
+                "Input",
+                "Cached",
+                "Cache write",
+                "Reasoning",
+                "Output",
+                "Всего токенов",
+                "Себестоимость, ₽",
+                "Списание, ₽",
             ],
             message_rows,
             datetime_columns={1},
@@ -528,22 +593,48 @@ def _build_analytics_workbook(
     usage_sheet = workbook.create_sheet("Использование AI")
     usage_rows = [
         [
-            u.created_at, str(u.id), str(u.customer_id or ""),
-            str(u.conversation_id or ""), str(u.message_id or ""), u.provider, u.model,
-            u.reasoning_effort, u.input_tokens, u.cached_input_tokens,
-            u.cache_write_tokens, u.reasoning_tokens, u.output_tokens, u.total_tokens,
-            u.provider_cost_microrubles / 1_000_000, u.client_charge_kopecks / 100,
-            u.currency_rate_kopecks / 100, u.request_id,
+            u.created_at,
+            str(u.id),
+            str(u.customer_id or ""),
+            str(u.conversation_id or ""),
+            str(u.message_id or ""),
+            u.provider,
+            u.model,
+            u.reasoning_effort,
+            u.input_tokens,
+            u.cached_input_tokens,
+            u.cache_write_tokens,
+            u.reasoning_tokens,
+            u.output_tokens,
+            u.total_tokens,
+            u.provider_cost_microrubles / 1_000_000,
+            u.client_charge_kopecks / 100,
+            u.currency_rate_kopecks / 100,
+            u.request_id,
         ]
         for u in usage_events
     ]
     _write_sheet(
         usage_sheet,
         [
-            "Дата и время", "Usage ID", "Customer ID", "Conversation ID", "Message ID",
-            "Provider", "Модель", "Reasoning effort", "Input", "Cached", "Cache write",
-            "Reasoning", "Output", "Всего токенов", "Себестоимость, ₽", "Списание, ₽",
-            "Курс ₽/$", "Request ID",
+            "Дата и время",
+            "Usage ID",
+            "Customer ID",
+            "Conversation ID",
+            "Message ID",
+            "Provider",
+            "Модель",
+            "Reasoning effort",
+            "Input",
+            "Cached",
+            "Cache write",
+            "Reasoning",
+            "Output",
+            "Всего токенов",
+            "Себестоимость, ₽",
+            "Списание, ₽",
+            "Курс ₽/$",
+            "Request ID",
         ],
         usage_rows,
         datetime_columns={1},
@@ -567,13 +658,9 @@ def _group_usage(events: list[AIUsageEvent]) -> dict[UUID, list[AIUsageEvent]]:
     return result
 
 
-def _token_coverage(
-    ai_messages: list[Message], events: list[AIUsageEvent]
-) -> _TokenCoverage:
+def _token_coverage(ai_messages: list[Message], events: list[AIUsageEvent]) -> _TokenCoverage:
     """Describe whether zeroes are measured values or missing historical usage."""
-    recorded_message_ids = {
-        event.message_id for event in events if event.message_id is not None
-    }
+    recorded_message_ids = {event.message_id for event in events if event.message_id is not None}
     recorded_replies = sum(
         message.id in recorded_message_ids
         or _usage_has_tokens((message.ai_meta or {}).get("usage"))
@@ -645,9 +732,7 @@ def _daily_token_values(
         sum(event.provider_cost_microrubles for event in events) / 1_000_000
         if has_priced_event
         else None,
-        sum(event.client_charge_kopecks for event in events) / 100
-        if has_priced_event
-        else None,
+        sum(event.client_charge_kopecks for event in events) / 100 if has_priced_event else None,
     )
 
 
@@ -774,9 +859,7 @@ def _write_sheet(
                 cell.number_format = '#,##0.00 "₽"'
     for index, header in enumerate(headers, start=1):
         values = [str(header)] + [
-            str(row[index - 1] or "")
-            for row in rows[:200]
-            if index - 1 < len(row)
+            str(row[index - 1] or "") for row in rows[:200] if index - 1 < len(row)
         ]
         width = min(
             48 if index in wide_columns else 30,

@@ -2,6 +2,7 @@
 
 Run: ``uv run arq app.workers.worker.WorkerSettings``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable

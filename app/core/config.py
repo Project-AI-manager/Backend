@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_MODEL: str = "cx/gpt-5.4-mini"
     OPENAI_COMPATIBLE_TIMEOUT_SEC: float = 30.0
     OPENAI_COMPATIBLE_PROBE_TIMEOUT_SEC: float = 10.0
+    ML_RATE_LIMIT_PER_MINUTE: int = 20
+    TELEGRAM_CHAT_RATE_LIMIT_PER_MINUTE: int = 30
+    TENANT_LLM_CALLS_PER_HOUR: int = 300
+    TENANT_LLM_TOKENS_PER_DAY: int = 1_000_000
+    TENANT_LLM_COST_KOPECKS_PER_DAY: int = 100_000
     YANDEX_API_KEY: str = ""
     GIGACHAT_API_KEY: str = ""
     TELEGRAM_DELIVERY_ENABLED: bool = False
@@ -64,6 +69,7 @@ class Settings(BaseSettings):
     TELEGRAM_API_HASH: str = ""
 
     EMAIL_FROM: str = "Автопилот <no-reply@localhost>"
+    EMAIL_REPLY_TO: str = ""
     EMAIL_DEV_MODE: bool = True
     EMAIL_SEND_ENABLED: bool = False
     SMTP_HOST: str = ""
@@ -73,6 +79,7 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool = False
     EMAIL_TOKEN_TTL_MIN: int = 60
+    CONVERSATION_SSE_POLL_INTERVAL_SEC: float = 1.0
     APP_PUBLIC_URL: str = "http://localhost:3000"
 
     ACCESS_TOKEN_TTL_MIN: int = 30

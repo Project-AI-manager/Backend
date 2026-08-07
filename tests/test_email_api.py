@@ -124,6 +124,28 @@ def test_email_status_is_public(
     assert data["smtp_configured"] is False
 
 
+def test_email_deliverability_requires_admin_and_marks_dns_as_external(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokens = register(client)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    monkeypatch.setattr(settings, "EMAIL_FROM", "Autopilot <sender@example.com>")
+    monkeypatch.setattr(settings, "SMTP_USERNAME", "sender@example.com")
+
+    response = client.get("/api/v1/email/deliverability", headers=headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["sender_domain"] == "example.com"
+    checks = {item["name"]: item for item in data["checks"]}
+    assert checks["sender"]["status"] == "ok"
+    assert checks["smtp_alignment"]["status"] == "ok"
+    assert checks["spf"]["status"] == "external_check_required"
+    assert checks["dkim"]["status"] == "external_check_required"
+    assert checks["dmarc"]["status"] == "external_check_required"
+
+
 def test_email_verification_flow(client: TestClient) -> None:
     tokens = register(client)
     headers = {"Authorization": f"Bearer {tokens['access_token']}"}

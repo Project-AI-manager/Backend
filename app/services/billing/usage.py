@@ -17,9 +17,7 @@ class UsageCost:
 
 def calculate_usage_cost(model: str, usage: LLMUsage) -> UsageCost:
     if usage.provider_cost_usd > 0:
-        provider_cost_microrubles = round(
-            usage.provider_cost_usd * USD_RATE_KOPECKS * 10_000
-        )
+        provider_cost_microrubles = round(usage.provider_cost_usd * USD_RATE_KOPECKS * 10_000)
         return UsageCost(
             provider_cost_microrubles,
             round(provider_cost_microrubles * CLIENT_MARKUP / 10_000),

@@ -33,3 +33,4 @@ class MLAnswerResponse(BaseModel):
     provider: str
     sources: list[MLSourceSchema]
     used_context: bool
+    decision_reason: str = ""

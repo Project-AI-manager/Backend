@@ -61,10 +61,7 @@ def main() -> None:
         "Local demo database ready: "
         f"created={result.created}, updated={result.updated}, reset={result.reset}"
     )
-    print(
-        "Demo login: "
-        f"{DEMO_CREDENTIALS['owner_email']} / {DEMO_CREDENTIALS['password']}"
-    )
+    print(f"Demo login: {DEMO_CREDENTIALS['owner_email']} / {DEMO_CREDENTIALS['password']}")
 
 
 if __name__ == "__main__":

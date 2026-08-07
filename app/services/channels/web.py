@@ -1,4 +1,5 @@
 """Веб-чат — первый канал (свой виджет, WebSocket). Не зависит от внешних API."""
+
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 
 

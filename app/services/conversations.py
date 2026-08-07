@@ -492,9 +492,7 @@ async def _deliver_outbound_attachments(
     read_states: list[bool] = []
     original_text = message.text
     try:
-        for index, (file_path, metadata) in enumerate(
-            zip(file_paths, metadata_items, strict=True)
-        ):
+        for index, (file_path, metadata) in enumerate(zip(file_paths, metadata_items, strict=True)):
             # Telegram captions belong to an individual media item. Send the
             # user's text once, below the ordered attachment group in our UI.
             message.text = original_text if index == 0 else ""
@@ -550,8 +548,10 @@ async def get_conversation_attachment(
             path = attachment_path(storage_key)
             if not path.is_file():
                 break
-            return path, str(item.get("name") or "attachment"), str(
-                item.get("content_type") or "application/octet-stream"
+            return (
+                path,
+                str(item.get("name") or "attachment"),
+                str(item.get("content_type") or "application/octet-stream"),
             )
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Вложение не найдено")
 

@@ -27,7 +27,7 @@ def verification_email(*, name: str, code: str, ttl_minutes: int) -> tuple[str, 
         content=(
             f'<div style="margin:28px 0;text-align:center">'
             f'<span style="display:inline-block;padding:16px 24px;border:1px solid #b9ceff;'
-            f'border-radius:12px;background:#eef4ff;color:#1546ad;font-size:32px;'
+            f"border-radius:12px;background:#eef4ff;color:#1546ad;font-size:32px;"
             f'font-weight:800;letter-spacing:8px;line-height:1;font-family:Arial,sans-serif">'
             f"{escape(code)}</span></div>"
             f'<p style="margin:0;color:#526071;font-size:14px;line-height:22px">'
@@ -53,8 +53,8 @@ def password_reset_email(*, code: str, ttl_minutes: int) -> tuple[str, str]:
         content=(
             '<div style="margin:28px 0;text-align:center">'
             '<span style="display:inline-block;padding:16px 24px;'
-            'border:1px solid #b9ceff;border-radius:12px;background:#eef4ff;'
-            'color:#1546ad;font-size:32px;font-weight:800;letter-spacing:8px;'
+            "border:1px solid #b9ceff;border-radius:12px;background:#eef4ff;"
+            "color:#1546ad;font-size:32px;font-weight:800;letter-spacing:8px;"
             'line-height:1;font-family:Arial,sans-serif">'
             f"{escape(code)}</span></div>"
             '<p style="margin:0;color:#526071;font-size:14px;line-height:22px">'
@@ -97,13 +97,13 @@ def escalation_email(
         ),
         content=(
             '<div style="margin:24px 0;padding:16px 18px;'
-            'border-left:4px solid #e9a52a;border-radius:8px;background:#fff8e8;'
+            "border-left:4px solid #e9a52a;border-radius:8px;background:#fff8e8;"
             'color:#344054;font-size:14px;line-height:22px">'
             f"{escape(preview).replace(chr(10), '<br>')}</div>"
             + (
                 f'<a href="{escape(safe_conversation_href, quote=True)}" '
                 'style="display:inline-block;padding:13px 20px;border-radius:9px;'
-                f'background:{BRAND_BLUE};color:#ffffff;font-size:14px;font-weight:700;'
+                f"background:{BRAND_BLUE};color:#ffffff;font-size:14px;font-weight:700;"
                 'text-decoration:none">Открыть диалог на '
                 f"{escape(display_hostname)}</a>"
                 if safe_conversation_href

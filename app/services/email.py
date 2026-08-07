@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formatdate, make_msgid
+from email.utils import formatdate, make_msgid, parseaddr
 
 from fastapi import HTTPException, status
 from sqlalchemy import desc, or_, select
@@ -21,7 +21,12 @@ from app.core.security import hash_password, hash_token
 from app.models.email import EmailOutbox, EmailToken
 from app.models.user import User, UserNotificationSettings
 from app.schemas.auth import EmailActionResponse
-from app.schemas.email import EmailOutboxResponse, EmailStatusResponse
+from app.schemas.email import (
+    EmailDeliverabilityCheck,
+    EmailDeliverabilityResponse,
+    EmailOutboxResponse,
+    EmailStatusResponse,
+)
 from app.services.email_assets import (
     AUTOPILOT_LOGO_CID,
     AUTOPILOT_LOGO_FILENAME,
@@ -43,12 +48,60 @@ def email_status() -> EmailStatusResponse:
         send_enabled=settings.EMAIL_SEND_ENABLED,
         dev_mode=settings.EMAIL_DEV_MODE,
         smtp_configured=bool(
-            settings.SMTP_HOST
-            and settings.SMTP_USERNAME
-            and settings.SMTP_PASSWORD
+            settings.SMTP_HOST and settings.SMTP_USERNAME and settings.SMTP_PASSWORD
         ),
         from_email=settings.EMAIL_FROM,
     )
+
+
+def email_deliverability() -> EmailDeliverabilityResponse:
+    """Report config and external DNS checks required for trustworthy mail."""
+    _display_name, sender_email = parseaddr(settings.EMAIL_FROM)
+    sender_domain = sender_email.rpartition("@")[2].lower()
+    smtp_email = parseaddr(settings.SMTP_USERNAME)[1] or settings.SMTP_USERNAME.strip()
+    smtp_domain = smtp_email.rpartition("@")[2].lower()
+    valid_sender = bool(sender_email and sender_domain and sender_domain != "localhost")
+    aligned = bool(sender_domain and smtp_domain and sender_domain == smtp_domain)
+    checks = [
+        EmailDeliverabilityCheck(
+            name="sender",
+            status="ok" if valid_sender else "error",
+            message=(
+                "From uses a public sender domain"
+                if valid_sender
+                else "Set EMAIL_FROM to a real mailbox on the sending domain"
+            ),
+        ),
+        EmailDeliverabilityCheck(
+            name="smtp_alignment",
+            status="ok" if aligned else "warning",
+            message=(
+                "From domain is aligned with the authenticated SMTP account"
+                if aligned
+                else "Align EMAIL_FROM with SMTP_USERNAME or configure provider alignment"
+            ),
+        ),
+    ]
+    for name, message in (
+        ("spf", f"Verify an SPF TXT record for {sender_domain or '<sender-domain>'}"),
+        ("dkim", "Enable DKIM signing at the SMTP provider and verify its selector record"),
+        ("dmarc", f"Verify TXT _dmarc.{sender_domain or '<sender-domain>'}"),
+        ("mail_tester", "Send a real message to mail-tester.com and keep its report"),
+    ):
+        checks.append(
+            EmailDeliverabilityCheck(
+                name=name,
+                status="external_check_required",
+                message=message,
+            )
+        )
+    return EmailDeliverabilityResponse(
+        sender_email=sender_email,
+        sender_domain=sender_domain,
+        checks=checks,
+    )
+
+
 async def request_email_verification(
     session: AsyncSession,
     user: User,
@@ -297,6 +350,10 @@ def _send_smtp(outbox: EmailOutbox) -> None:
     message["Subject"] = outbox.subject
     message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(domain=_sender_domain())
+    message["Auto-Submitted"] = "auto-generated"
+    message["X-Auto-Response-Suppress"] = "All"
+    if settings.EMAIL_REPLY_TO.strip():
+        message["Reply-To"] = settings.EMAIL_REPLY_TO.strip()
     message.set_content(outbox.body_text, subtype="plain", charset="utf-8")
     body_html = (outbox.metadata_json or {}).get("body_html")
     if isinstance(body_html, str) and body_html:
@@ -339,10 +396,7 @@ def _html_with_embedded_logo_fallback(body_html: str) -> str:
     """Let clients that ignore CID find the same related part by location."""
     return body_html.replace(
         f'src="cid:{AUTOPILOT_LOGO_CID}"',
-        (
-            f'src="cid:{AUTOPILOT_LOGO_CID}" '
-            f'data-fallback-src="{AUTOPILOT_LOGO_FILENAME}"'
-        ),
+        (f'src="cid:{AUTOPILOT_LOGO_CID}" data-fallback-src="{AUTOPILOT_LOGO_FILENAME}"'),
     )
 
 

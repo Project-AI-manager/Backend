@@ -12,8 +12,9 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     VerifyEmailRequest,
 )
-from app.schemas.email import EmailOutboxResponse, EmailStatusResponse
+from app.schemas.email import EmailDeliverabilityResponse, EmailOutboxResponse, EmailStatusResponse
 from app.services.email import (
+    email_deliverability,
     email_status,
     list_outbox,
     request_email_verification,
@@ -28,6 +29,12 @@ router = APIRouter()
 @router.get("/status", response_model=EmailStatusResponse)
 async def status() -> EmailStatusResponse:
     return email_status()
+
+
+@router.get("/deliverability", response_model=EmailDeliverabilityResponse)
+async def deliverability(user: AdminUser) -> EmailDeliverabilityResponse:
+    del user
+    return email_deliverability()
 
 
 @router.post("/verification/request", response_model=EmailActionResponse)

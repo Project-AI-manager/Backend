@@ -1,4 +1,5 @@
 """База знаний: документы, чанки, кандидаты автообучения. См. knowledge-base, rag-pipeline."""
+
 import uuid
 
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
@@ -41,6 +42,7 @@ class KbChunk(Base, UUIDMixin, TimestampMixin):
 
 class KbCandidate(Base, UUIDMixin, TimestampMixin):
     """Кандидат из цикла автообучения: вопрос → ответ менеджера → подтверждение."""
+
     __tablename__ = "kb_candidate"
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversation.id"))

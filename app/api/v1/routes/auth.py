@@ -1,4 +1,5 @@
 """Аутентификация: регистрация (создание компании), вход, refresh. Экран: /login, /register."""
+
 from fastapi import APIRouter
 
 from app.api.deps import SessionDep

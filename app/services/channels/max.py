@@ -1,4 +1,5 @@
 """MAX (мессенджер) — за пределами MVP (зрелость Bot API под вопросом). Заглушка-задел."""
+
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 
 

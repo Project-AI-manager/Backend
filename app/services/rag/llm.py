@@ -222,9 +222,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if not isinstance(data, dict) or not isinstance(data.get("usage"), dict):
             return LLMUsage()
         usage = data["usage"]
-        input_tokens = OpenAICompatibleProvider._usage_int(
-            usage, "prompt_tokens", "input_tokens"
-        )
+        input_tokens = OpenAICompatibleProvider._usage_int(usage, "prompt_tokens", "input_tokens")
         output_tokens = OpenAICompatibleProvider._usage_int(
             usage, "completion_tokens", "output_tokens"
         )
@@ -415,9 +413,7 @@ class OpenAICompatibleProvider(LLMProvider):
         response_id = response_trailers.get("x-omniroute-request-id", response_id)
 
         if content_parts:
-            result: dict[str, Any] = {
-                "choices": [{"message": {"content": "".join(content_parts)}}]
-            }
+            result: dict[str, Any] = {"choices": [{"message": {"content": "".join(content_parts)}}]}
             if response_usage:
                 result["usage"] = response_usage
             if response_model:

@@ -2,6 +2,7 @@
 
 Мультитенантность: почти у всех таблиц есть tenant_id (см. wiki/concepts/data-model.md).
 """
+
 import uuid
 from datetime import datetime
 

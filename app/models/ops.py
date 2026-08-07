@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import BigInteger, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, JsonDict, TimestampMixin, UUIDMixin
@@ -86,3 +86,27 @@ class AIUsageEvent(Base, UUIDMixin, TimestampMixin):
     provider_cost_microrubles: Mapped[int] = mapped_column(BigInteger, default=0)
     client_charge_kopecks: Mapped[int] = mapped_column(Integer, default=0)
     currency_rate_kopecks: Mapped[int] = mapped_column(Integer, default=9000)
+    outcome: Mapped[str] = mapped_column(String(24), default="completed")
+    error_code: Mapped[str] = mapped_column(String(64), default="")
+    metadata_json: Mapped[dict] = mapped_column(JsonDict, default=dict)
+
+
+class AIDecisionEvent(Base, UUIDMixin, TimestampMixin):
+    """Auditable decision even when no provider generation is performed."""
+
+    __tablename__ = "ai_decision_event"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer.id"), nullable=True, index=True
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation.id"), nullable=True, index=True
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("message.id"), nullable=True, index=True
+    )
+    decision: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(64))
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    explanation: Mapped[str] = mapped_column(Text, default="")

@@ -7,7 +7,7 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_token
-from app.db.session import get_session
+from app.db.session import SessionLocal, get_session
 from app.models.user import User
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -48,6 +48,22 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[UserContext, Depends(get_current_user)]
+
+
+async def get_stream_current_user(
+    authorization: Annotated[str | None, Header()] = None,
+) -> UserContext:
+    """Authenticate a long-lived stream without holding a pooled DB session.
+
+    Yield-based request dependencies stay alive until a streaming response is
+    closed. Opening and closing the lookup session here prevents one database
+    connection being pinned per browser tab.
+    """
+    async with SessionLocal() as session:
+        return await get_current_user(session, authorization)
+
+
+StreamCurrentUser = Annotated[UserContext, Depends(get_stream_current_user)]
 
 
 def require_role(user: UserContext, *allowed_roles: str) -> None:

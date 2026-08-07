@@ -3,11 +3,11 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
-from app.api.v1.routes.ml import answer_message
+from app.api.v1.routes.ml import run_answer_message
 from app.schemas.knowledge import (
     KnowledgeCandidateApproveResponse,
     KnowledgeCandidateResponse,
@@ -147,11 +147,12 @@ async def archive_document(
 @router.post("/ask", response_model=MLAnswerResponse)
 async def ask(
     body: MLAnswerRequest,
+    request: Request,
     user: CurrentUser,
     session: SessionDep,
 ) -> MLAnswerResponse:
     """Knowledge playground: same ML flow, exposed under knowledge for the UI."""
-    return await answer_message(body, user, session)
+    return await run_answer_message(body, user, session, request=request)
 
 
 @router.get("/candidates", response_model=list[KnowledgeCandidateResponse])

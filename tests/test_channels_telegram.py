@@ -24,10 +24,11 @@ from app.models.channel import Channel, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.email import EmailOutbox
 from app.models.knowledge import KbChunk, KbDocument
-from app.models.ops import AIUsageEvent
+from app.models.ops import AIDecisionEvent, AIUsageEvent
 from app.models.tenant import Tenant, TenantAIConfig
 from app.models.user import User, UserNotificationSettings
 from app.services.channels.telegram import process_telegram_inbound_message
+from app.services.ml.service import MLMessageService
 
 TENANT_ID = uuid.UUID("44444444-4444-4444-8444-444444444401")
 USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444402")
@@ -36,6 +37,9 @@ USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444402")
 @pytest.fixture(autouse=True)
 def disable_real_email_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "EMAIL_SEND_ENABLED", False)
+    # Unit tests exercise the SQL retrieval fallback. A running local backend may
+    # legitimately hold the embedded Qdrant lock, so tests must not share it.
+    monkeypatch.setattr(settings, "QDRANT_ENABLED", False)
 
 
 def create_table(sync_connection: Connection, table: object) -> None:
@@ -63,6 +67,7 @@ async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], 
             Conversation.__table__,
             Message.__table__,
             AIUsageEvent.__table__,
+            AIDecisionEvent.__table__,
             KbDocument.__table__,
             KbChunk.__table__,
         ):
@@ -443,8 +448,8 @@ def test_new_inbound_reopens_closed_conversation_without_duplicate(
     ]
     assert sorted(inbound_texts) == sorted(
         [
-        "Первый вопрос",
-        "Новый вопрос после закрытия",
+            "Первый вопрос",
+            "Новый вопрос после закрытия",
         ]
     )
 
@@ -556,9 +561,7 @@ def test_mtproto_inbound_auto_reply_uses_mtproto_delivery(
         f"/api/v1/conversations/{response.json()['conversation_id']}",
         headers=auth_headers(),
     ).json()
-    outbound = next(
-        message for message in thread["messages"] if message["direction"] == "outbound"
-    )
+    outbound = next(message for message in thread["messages"] if message["direction"] == "outbound")
     assert outbound["sender_type"] == "ai"
     assert outbound["status"] == "sent"
     assert outbound["ai_meta"]["delivery"] == "telegram-mtproto"
@@ -588,9 +591,7 @@ def test_disabled_bot_delivery_keeps_auto_reply_pending(
         f"/api/v1/conversations/{response.json()['conversation_id']}",
         headers=auth_headers(),
     ).json()
-    outbound = next(
-        message for message in thread["messages"] if message["direction"] == "outbound"
-    )
+    outbound = next(message for message in thread["messages"] if message["direction"] == "outbound")
     assert outbound["status"] == "pending"
     assert outbound["ai_meta"]["delivery"] == "delivery-disabled"
 
@@ -912,3 +913,74 @@ def test_telegram_webhook_escalates_without_auto_reply(
     assert conversations.status_code == 200
     assert conversations.json()[0]["status"] == "escalated"
     assert asyncio.run(count_rows(session_factory, Message)) == 1
+
+
+def test_escalation_sends_customer_acknowledgement_and_records_reason(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=False))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    delivered: list[str] = []
+
+    async def capture_message(_channel: Channel, _chat_id: str, text: str) -> bool:
+        delivered.append(text)
+        return True
+
+    monkeypatch.setattr(settings, "TELEGRAM_DELIVERY_ENABLED", True)
+    monkeypatch.setattr("app.services.channels.telegram.send_telegram_message", capture_message)
+
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=1999, text="Сколько стоит доставка?"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "escalate"
+    assert any("передал ваш вопрос менеджеру" in text for text in delivered)
+
+    async def decision_reason() -> str:
+        from app.models.ops import AIDecisionEvent
+
+        async with session_factory() as session:
+            result = await session.execute(select(AIDecisionEvent.reason))
+            return str(result.scalar_one())
+
+    assert asyncio.run(decision_reason()) == "auto_reply_disabled"
+
+
+def test_chat_rate_limit_runs_before_llm_and_deduplicates_webhook(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_RATE_LIMIT_PER_MINUTE", 1)
+    calls = 0
+    original = MLMessageService.answer
+
+    async def count_answer(self: MLMessageService, *args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(MLMessageService, "answer", count_answer)
+    first = client.post("/api/v1/channels/webhook/telegram", json=telegram_payload(update_id=2001))
+    second_payload = telegram_payload(update_id=2002)
+    second = client.post("/api/v1/channels/webhook/telegram", json=second_payload)
+    duplicate = client.post("/api/v1/channels/webhook/telegram", json=second_payload)
+
+    assert first.json()["decision"] == "auto_reply"
+    assert second.json()["decision"] == "escalate"
+    assert duplicate.json()["duplicate"] is True
+    assert calls == 1

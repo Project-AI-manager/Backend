@@ -2,6 +2,7 @@
 
 Поток обработки обращения и слои — см. wiki/concepts/system-architecture.md.
 """
+
 import asyncio
 from contextlib import asynccontextmanager, suppress
 

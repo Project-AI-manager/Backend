@@ -1,4 +1,5 @@
 """Клиенты и диалоги — ядро inbox. См. data-model: Группа 3."""
+
 import uuid
 from datetime import datetime
 
@@ -17,6 +18,7 @@ class Customer(Base, UUIDMixin, TimestampMixin):
 
 class CustomerIdentity(Base, UUIDMixin):
     """Привязка клиента к id в конкретном канале (узнаём человека across каналов)."""
+
     __tablename__ = "customer_identity"
     __table_args__ = (
         UniqueConstraint(

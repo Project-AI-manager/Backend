@@ -13,6 +13,18 @@ class EmailStatusResponse(BaseModel):
     from_email: str
 
 
+class EmailDeliverabilityCheck(BaseModel):
+    name: str
+    status: str
+    message: str
+
+
+class EmailDeliverabilityResponse(BaseModel):
+    sender_email: str
+    sender_domain: str
+    checks: list[EmailDeliverabilityCheck]
+
+
 class EmailOutboxResponse(BaseModel):
     id: UUID
     to_email: EmailStr

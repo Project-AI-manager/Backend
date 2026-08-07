@@ -27,8 +27,7 @@ async def notify_escalation_if_due(
         .where(
             EmailOutbox.tenant_id == conversation.tenant_id,
             EmailOutbox.purpose == ESCALATION_ALERT,
-            EmailOutbox.metadata_json["conversation_id"].as_string()
-            == str(conversation.id),
+            EmailOutbox.metadata_json["conversation_id"].as_string() == str(conversation.id),
         )
         .order_by(desc(EmailOutbox.created_at))
         .limit(1)

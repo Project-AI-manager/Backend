@@ -1,4 +1,5 @@
 """VK Callback / Long Poll API (сообщения сообщества). TODO."""
+
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 
 

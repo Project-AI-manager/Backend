@@ -11,6 +11,17 @@ from uuid import UUID
 from app.services.rag.llm import LLMUsage
 
 Decision = Literal["auto_reply", "escalate"]
+DecisionReason = Literal[
+    "auto_reply_grounded",
+    "auto_reply_social",
+    "auto_reply_disabled",
+    "low_confidence",
+    "manager_rule",
+    "no_context",
+    "off_topic",
+    "prompt_injection",
+    "empty_answer",
+]
 ChatRole = Literal["customer", "manager", "ai", "system"]
 
 
@@ -85,3 +96,4 @@ class MLAnswerResult:
     model: str = ""
     request_id: str = ""
     usage: LLMUsage = field(default_factory=LLMUsage)
+    decision_reason: DecisionReason = "no_context"

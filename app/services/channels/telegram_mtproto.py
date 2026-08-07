@@ -108,9 +108,7 @@ async def start_account_connection(
         pending = None
 
     client = (
-        pending.client
-        if pending is not None
-        else TelegramClient(StringSession(), api_id, api_hash)
+        pending.client if pending is not None else TelegramClient(StringSession(), api_id, api_hash)
     )
     try:
         await client.connect()
@@ -659,9 +657,7 @@ async def reconcile_mtproto_messages_read(
         except (TypeError, ValueError):
             continue
         raw_access_hash = metadata.get("peer_access_hash")
-        peer_access_hashes[peer_id] = (
-            raw_access_hash if isinstance(raw_access_hash, int) else None
-        )
+        peer_access_hashes[peer_id] = raw_access_hash if isinstance(raw_access_hash, int) else None
 
     if not peer_access_hashes:
         return 0

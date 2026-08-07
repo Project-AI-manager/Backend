@@ -2,6 +2,7 @@
 
 См. wiki/concepts/rag-pipeline.md и confidence-and-escalation.md.
 """
+
 from app.services.confidence import compute_confidence
 from app.services.rag.embeddings import get_embedder
 from app.services.rag.llm import get_llm

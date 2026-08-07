@@ -133,9 +133,7 @@ class OpenAICompatibleEmbedding(EmbeddingProvider):
         ordered: list[tuple[int, list[float]]] = []
         for position, item in enumerate(payload["data"]):
             if not isinstance(item, dict) or not isinstance(item.get("embedding"), list):
-                raise EmbeddingProviderRequestError(
-                    "Embedding provider returned an invalid vector"
-                )
+                raise EmbeddingProviderRequestError("Embedding provider returned an invalid vector")
             try:
                 vector = [float(value) for value in item["embedding"]]
                 index = int(item.get("index", position))
@@ -190,12 +188,13 @@ class LocalMLEmbedding(EmbeddingProvider):
                 )
         return vectors
 
+
 def get_embedder(
     model: str | None = None,
     *,
     timeout_sec: float | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-    ) -> EmbeddingProvider:
+) -> EmbeddingProvider:
     configured_provider = settings.EMBEDDING_PROVIDER.strip().lower()
     configured_model = (model or settings.EMBEDDING_MODEL).strip()
     # Контракт эмбеддингов один на деплой: коллекция Qdrant создана под

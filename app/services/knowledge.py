@@ -88,8 +88,7 @@ async def list_kb_documents(
         .order_by(desc(KbDocument.created_at))
     )
     return [
-        _document_response(document, int(chunks_count))
-        for document, chunks_count in result.all()
+        _document_response(document, int(chunks_count)) for document, chunks_count in result.all()
     ]
 
 
@@ -413,8 +412,6 @@ async def reindex_tenant_knowledge(
     )
 
 
-
-
 async def _index_chunks(
     *,
     session: AsyncSession,
@@ -511,8 +508,7 @@ async def reindex_kb_document(session: AsyncSession, document_id: uuid.UUID) -> 
                             title=document.title,
                             text=chunk.text,
                             tags={
-                                str(key): str(value)
-                                for key, value in (chunk.tags or {}).items()
+                                str(key): str(value) for key, value in (chunk.tags or {}).items()
                             },
                             version=chunk.version,
                             vector=vector,

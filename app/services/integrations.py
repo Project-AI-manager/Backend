@@ -187,7 +187,15 @@ async def probe_qdrant() -> IntegrationProbeResponse:
             details=details,
         )
 
-    vector_store = get_vector_store()
+    try:
+        vector_store = get_vector_store()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never crash the health route.
+        return IntegrationProbeResponse(
+            name="qdrant",
+            status="error",
+            message="Qdrant client is not ready",
+            details={**details, "error": str(exc)},
+        )
     if vector_store is None:
         return IntegrationProbeResponse(
             name="qdrant",
@@ -224,9 +232,7 @@ def probe_email() -> IntegrationProbeResponse:
                 "dev_mode": settings.EMAIL_DEV_MODE,
                 "from_email": settings.EMAIL_FROM,
                 "smtp_configured": bool(
-                    settings.SMTP_HOST
-                    and settings.SMTP_USERNAME
-                    and settings.SMTP_PASSWORD
+                    settings.SMTP_HOST and settings.SMTP_USERNAME and settings.SMTP_PASSWORD
                 ),
             },
         )

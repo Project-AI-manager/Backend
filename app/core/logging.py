@@ -1,4 +1,5 @@
 """Структурные JSON-логи (structlog) — прозрачность для требований доверия МСП."""
+
 import logging
 
 import structlog

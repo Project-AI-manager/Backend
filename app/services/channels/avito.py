@@ -1,4 +1,5 @@
 """Avito Messenger API + вебхуки. Ядро ICP. TODO: OAuth-подключение, лимиты."""
+
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
 
 

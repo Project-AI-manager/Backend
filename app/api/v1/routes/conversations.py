@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.api.deps import CurrentUser, SessionDep, tenant_id_from_user
+from app.api.deps import CurrentUser, SessionDep, StreamCurrentUser, tenant_id_from_user
 from app.core.config import settings
 from app.schemas.conversations import (
     ConversationActionResponse,
@@ -20,6 +20,7 @@ from app.services.conversation_attachments import (
     delete_attachment,
     validate_and_store_attachment,
 )
+from app.services.conversation_events import conversation_event_stream
 from app.services.conversations import (
     close_conversation,
     escalate_conversation,
@@ -33,6 +34,20 @@ from app.services.conversations import (
 )
 
 router = APIRouter()
+
+
+@router.get("/events")
+async def events(user: StreamCurrentUser) -> StreamingResponse:
+    """Authenticated tenant-scoped inbox invalidations over SSE."""
+    return StreamingResponse(
+        conversation_event_stream(tenant_id_from_user(user)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("", response_model=list[ConversationResponse])
