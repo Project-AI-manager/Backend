@@ -362,6 +362,93 @@ def test_personal_account_requires_application_credentials(
     assert response.status_code == 503
 
 
+def test_reconnect_rejects_different_telegram_account(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    channel_id = uuid.uuid4()
+
+    async def seed_disconnected_channel() -> None:
+        async with session_factory() as session:
+            session.add(
+                Channel(
+                    id=channel_id,
+                    tenant_id=TENANT_ID,
+                    type="telegram",
+                    name="Original",
+                    status="disabled",
+                    credentials_encrypted="",
+                    settings={
+                        "transport": "mtproto",
+                        "auth_status": "disconnected",
+                        "account_id": "77",
+                    },
+                )
+            )
+            await session.commit()
+
+    class FakeSession:
+        def save(self) -> str:
+            return "different-session"
+
+    class FakeClient:
+        session = FakeSession()
+
+        def __init__(self, *_args: object) -> None: ...
+
+        async def connect(self) -> None: ...
+
+        async def disconnect(self) -> None: ...
+
+        async def send_code_request(self, _phone: str) -> object:
+            return SimpleNamespace(
+                phone_code_hash="code-hash",
+                type=SimpleNamespace(),
+                next_type=None,
+                timeout=30,
+            )
+
+        async def sign_in(self, **_kwargs: object) -> None: ...
+
+        async def get_me(self) -> object:
+            return SimpleNamespace(id=88, first_name="Different", last_name="", username="other")
+
+    asyncio.run(seed_disconnected_channel())
+    monkeypatch.setattr(telegram_mtproto, "TelegramClient", FakeClient)
+    telegram_mtproto._pending_auth.clear()
+
+    started = client.post(
+        "/api/v1/channels/telegram/account/start",
+        headers=headers(),
+        json={"phone": "+79990001122"},
+    )
+    confirmed = client.post(
+        "/api/v1/channels/telegram/account/confirm",
+        headers=headers(),
+        json={"channel_id": started.json()["channel_id"], "code": "12345"},
+    )
+
+    assert started.status_code == 200, started.text
+    assert started.json()["channel_id"] == str(channel_id)
+    assert confirmed.status_code == 409
+    assert "тот же Telegram-аккаунт" in confirmed.json()["detail"]["message"]
+
+    async def stored_channel() -> Channel:
+        async with session_factory() as session:
+            channel = await session.get(Channel, channel_id)
+            assert channel is not None
+            return channel
+
+    channel = asyncio.run(stored_channel())
+    assert channel.status == "disabled"
+    assert channel.credentials_encrypted == ""
+    assert channel.settings["account_id"] == "77"
+    assert channel.settings["auth_status"] == "account_mismatch"
+
+
 def test_mtproto_delivery_uses_access_hash_and_returns_message_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

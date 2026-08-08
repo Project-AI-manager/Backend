@@ -266,6 +266,7 @@ async def reply_to_conversation_with_file(
     conversation, _customer_name, channel = await _conversation_with_channel(
         session, tenant_id, conversation_id
     )
+    _ensure_outbound_channel_connected(channel)
     latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
     chat_id = _message_chat_id(latest_inbound)
     replied_at = datetime.now(UTC)

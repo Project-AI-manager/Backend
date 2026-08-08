@@ -286,6 +286,48 @@ def test_manager_reply_rejects_disabled_channel_without_replacement(
     assert asyncio.run(outbound_count()) == 0
 
 
+def test_file_reply_rejects_disabled_channel_and_cleans_upload(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+    monkeypatch.setattr(settings, "CONVERSATION_UPLOAD_DIR", str(tmp_path))
+
+    async def disable_channel() -> None:
+        async with session_factory() as session:
+            channel = await session.get(Channel, CHANNEL_ID)
+            assert channel is not None
+            channel.status = "disabled"
+            channel.credentials_encrypted = ""
+            channel.settings = {}
+            await session.commit()
+
+    asyncio.run(disable_channel())
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/reply-with-file",
+        headers=auth_headers(),
+        files={"files": ("note.txt", b"not delivered", "text/plain")},
+        data={"text": "Вложение не должно сохраниться."},
+    )
+
+    assert response.status_code == 409
+    assert "Переподключите канал telegram" in response.json()["detail"]["message"]
+    assert list(tmp_path.rglob("*.*")) == []
+
+    async def outbound_count() -> int:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.direction == "outbound")
+            )
+            return int(result.scalar_one())
+
+    assert asyncio.run(outbound_count()) == 0
+
+
 def test_manager_reply_marks_definitive_mtproto_failure(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

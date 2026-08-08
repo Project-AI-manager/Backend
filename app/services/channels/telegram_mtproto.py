@@ -174,6 +174,7 @@ async def start_account_connection(
         timeout_seconds,
     )
     channel.settings = {
+        **channel.settings,
         "auth_status": "code_required",
         "phone_masked": masked_phone,
         "transport": "mtproto",
@@ -223,6 +224,7 @@ async def start_qr_account_connection(
     )
     channel.status = "disabled"
     channel.settings = {
+        **channel.settings,
         "auth_status": "qr_waiting",
         "transport": "mtproto",
         "qr_expires_at": qr_login.expires.isoformat(),
@@ -334,6 +336,18 @@ async def _complete_auth(
     client: TelegramClient,
 ) -> TelegramAccountAuthResponse:
     me = await client.get_me()
+    account_id = str(getattr(me, "id", "") or "")
+    previous_account_id = str((channel.settings or {}).get("account_id") or "")
+    if previous_account_id and account_id != previous_account_id:
+        await client.disconnect()
+        _pending_auth.pop(channel.id, None)
+        _pending_qr_auth.pop(channel.id, None)
+        channel.settings = {**channel.settings, "auth_status": "account_mismatch"}
+        await session.commit()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Подключите тот же Telegram-аккаунт, к которому относится история диалогов.",
+        )
     display_name = " ".join(
         part
         for part in (
@@ -349,7 +363,7 @@ async def _complete_auth(
         **channel.settings,
         "auth_status": "active",
         "transport": "mtproto",
-        "account_id": str(getattr(me, "id", "")),
+        "account_id": account_id,
         "username": str(getattr(me, "username", "") or ""),
     }
     await session.commit()
