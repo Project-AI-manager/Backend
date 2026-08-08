@@ -183,7 +183,15 @@ async def disconnect_channel(
     channel.external_identity = None
     channel.webhook_identity = None
     channel.credentials_encrypted = ""
-    channel.settings = {}
+    if channel.type == "telegram" and (channel.settings or {}).get("transport") == "mtproto":
+        channel.settings = {
+            key: value
+            for key, value in (channel.settings or {}).items()
+            if key in {"transport", "account_id", "username", "phone_masked"}
+        }
+        channel.settings = {**channel.settings, "auth_status": "disconnected"}
+    else:
+        channel.settings = {}
     await session.commit()
     await session.refresh(channel)
     return _channel_response(channel)

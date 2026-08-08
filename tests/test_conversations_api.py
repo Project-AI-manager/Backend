@@ -249,6 +249,43 @@ def test_manager_reply_via_mtproto_persists_telegram_delivery_metadata(
     assert message["ai_meta"]["delivery"] == "channel-sent"
 
 
+def test_manager_reply_rejects_disabled_channel_without_replacement(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_conversation(session_factory))
+
+    async def disable_channel() -> None:
+        async with session_factory() as session:
+            channel = await session.get(Channel, CHANNEL_ID)
+            assert channel is not None
+            channel.status = "disabled"
+            channel.credentials_encrypted = ""
+            channel.settings = {}
+            await session.commit()
+
+    asyncio.run(disable_channel())
+    response = client.post(
+        f"/api/v1/conversations/{CONVERSATION_ID}/reply",
+        headers=auth_headers(),
+        json={"text": "Не должно сохраниться как будто отправлено."},
+    )
+
+    assert response.status_code == 409
+    assert "Переподключите канал telegram" in response.json()["detail"]["message"]
+
+    async def outbound_count() -> int:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.direction == "outbound")
+            )
+            return int(result.scalar_one())
+
+    assert asyncio.run(outbound_count()) == 0
+
+
 def test_manager_reply_marks_definitive_mtproto_failure(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

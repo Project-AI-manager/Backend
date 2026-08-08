@@ -283,6 +283,62 @@ def test_disconnect_telegram_channel_clears_credentials_and_preserves_history(
     assert conversation is not None
 
 
+def test_disconnect_mtproto_channel_preserves_reconnect_routing_metadata(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+    channel_id = uuid.uuid4()
+
+    async def seed_channel() -> None:
+        async with session_factory() as session:
+            session.add(
+                Channel(
+                    id=channel_id,
+                    tenant_id=TENANT_ID,
+                    type="telegram",
+                    name="Autopilot",
+                    status="active",
+                    credentials_encrypted="fernet:session",
+                    settings={
+                        "transport": "mtproto",
+                        "auth_status": "active",
+                        "account_id": "5808568297",
+                        "username": "Autopilot_Space",
+                        "phone_masked": "***9251",
+                        "read_watermarks": {"7001": 42},
+                    },
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed_channel())
+    response = client.delete(
+        f"/api/v1/channels/{channel_id}",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "disabled"
+    assert response.json()["settings"] == {
+        "transport": "mtproto",
+        "auth_status": "disconnected",
+        "account_id": "5808568297",
+        "username": "Autopilot_Space",
+        "phone_masked": "***9251",
+    }
+
+    async def stored_channel() -> Channel | None:
+        async with session_factory() as session:
+            return await session.get(Channel, channel_id)
+
+    channel = asyncio.run(stored_channel())
+    assert channel is not None
+    assert channel.credentials_encrypted == ""
+    assert channel.settings["transport"] == "mtproto"
+    assert channel.settings["auth_status"] == "disconnected"
+
+
 def test_disconnect_channel_requires_admin_and_hides_unknown_id(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

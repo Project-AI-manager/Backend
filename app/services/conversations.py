@@ -123,6 +123,7 @@ async def reply_to_conversation(
         tenant_id,
         conversation_id,
     )
+    _ensure_outbound_channel_connected(channel)
     latest_inbound = await _latest_inbound_message(session, tenant_id, conversation_id)
     chat_id = _message_chat_id(latest_inbound)
 
@@ -417,6 +418,22 @@ async def _conversation_with_channel(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
     conversation, customer_name, channel = row
     return conversation, customer_name, channel
+
+
+def _ensure_outbound_channel_connected(channel: Channel) -> None:
+    """Reject delivery through a disconnected historical channel.
+
+    Provider identifiers saved in a conversation belong to the exact account
+    that received them.  Falling back to another active account of the same
+    type could address the wrong Telegram peer, so reconnect logic must keep or
+    explicitly migrate the original channel row instead.
+    """
+    if channel.status in {"active", "connected"}:
+        return
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        f"Переподключите канал {channel.type}, прежде чем отправлять сообщение.",
+    )
 
 
 async def _latest_inbound_message(
