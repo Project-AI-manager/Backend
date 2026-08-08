@@ -18,12 +18,15 @@ from app.schemas.conversations import (
     ConversationResponse,
     ConversationThreadResponse,
 )
+from app.services.channels.avito import send_avito_message
 from app.services.channels.telegram import send_telegram_file, send_telegram_message
 from app.services.channels.telegram_mtproto import (
     apply_mtproto_read_watermark,
     send_mtproto_file,
     send_mtproto_message,
 )
+from app.services.channels.vk import VK_MAX_MESSAGE_LENGTH, send_vk_message
+from app.services.channels.whatsapp import send_whatsapp_message
 from app.services.conversation_attachments import (
     StoredConversationAttachment,
     attachment_path,
@@ -150,7 +153,29 @@ async def reply_to_conversation(
     session.add(message)
     await session.flush()
 
-    delivered, read = await _deliver_outbound_message(channel, message)
+    if channel.type == "vk" and len(text) > VK_MAX_MESSAGE_LENGTH:
+        message.status = "failed"
+        message.ai_meta = {**message.ai_meta, "delivery": "vk-message-too-long"}
+        await session.commit()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"VK message exceeds {VK_MAX_MESSAGE_LENGTH} characters",
+        )
+
+    if channel.type == "vk":
+        # Make the outbound id/random_id durable before the provider call.
+        await session.commit()
+
+    try:
+        delivered, read = await _deliver_outbound_message(channel, message)
+    except HTTPException:
+        if channel.type == "vk":
+            message = await session.get(Message, message.id)
+            if message is not None:
+                message.status = "pending"
+                message.ai_meta = {**(message.ai_meta or {}), "delivery": "vk-delivery-unknown"}
+                await session.commit()
+        raise
     transport = str((channel.settings or {}).get("transport") or "")
     message.status = "sent" if delivered else "failed" if transport == "mtproto" else "pending"
     if delivered and read:
@@ -416,6 +441,38 @@ async def _deliver_outbound_message(
     channel: Channel,
     message: Message,
 ) -> tuple[bool, bool]:
+    if channel.type == "whatsapp":
+        chat_id = _message_chat_id(message)
+        if not chat_id:
+            return False, False
+        result = await send_whatsapp_message(channel, chat_id, message.text)
+        if result.external_message_id:
+            message.external_message_id = result.external_message_id
+        message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
+        return result.delivered, result.status == "read"
+    if channel.type == "avito":
+        chat_id = _message_chat_id(message)
+        if not chat_id:
+            return False, False
+        result = await send_avito_message(channel, chat_id, message.text)
+        if result.external_message_id:
+            message.external_message_id = result.external_message_id
+        message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
+        return result.delivered, False
+    if channel.type == "vk":
+        chat_id = _message_chat_id(message)
+        if not chat_id:
+            return False, False
+        result = await send_vk_message(
+            channel,
+            chat_id,
+            message.text,
+            idempotency_key=str(message.id),
+        )
+        if result.external_message_id:
+            message.external_message_id = result.external_message_id
+        message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
+        return result.delivered, False
     if channel.type != "telegram":
         return False, False
 

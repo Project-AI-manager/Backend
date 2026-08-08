@@ -40,12 +40,14 @@ class Conversation(Base, UUIDMixin, TimestampMixin):
             "tenant_id",
             "channel_id",
             "customer_id",
+            "external_conversation_id",
             name="uq_conversation_tenant_channel_customer",
         ),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer.id"))
     channel_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("channel.id"))
+    external_conversation_id: Mapped[str] = mapped_column(String(255), default="")
     # open|auto|answered|escalated|closed|snoozed
     status: Mapped[str] = mapped_column(String(16), default="open")
     assignee_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("user.id"), nullable=True)

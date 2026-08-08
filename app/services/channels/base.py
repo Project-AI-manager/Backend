@@ -18,6 +18,14 @@ class NormalizedMessage:
     attachments: dict = field(default_factory=dict)
 
 
+@dataclass
+class DeliveryResult:
+    delivered: bool
+    external_message_id: str | None = None
+    status: str = "pending"
+    metadata: dict = field(default_factory=dict)
+
+
 class ChannelAdapter(ABC):
     type: str
 

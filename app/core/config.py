@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     TELEGRAM_LISTENER_IN_PROCESS: bool = False
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: str = ""
+    WHATSAPP_GRAPH_BASE_URL: str = "https://graph.facebook.com"
+    WHATSAPP_DELIVERY_TIMEOUT_SEC: float = 8.0
+    AVITO_API_BASE_URL: str = "https://api.avito.ru"
+    AVITO_OAUTH_AUTHORIZE_URL: str = "https://avito.ru/oauth"
+    AVITO_CLIENT_ID: str = ""
+    AVITO_CLIENT_SECRET: str = ""
+    AVITO_DELIVERY_TIMEOUT_SEC: float = 8.0
+    VK_API_BASE_URL: str = "https://api.vk.ru/method"
+    VK_API_VERSION: str = "5.131"
+    VK_DELIVERY_TIMEOUT_SEC: float = 8.0
 
     EMAIL_FROM: str = "Автопилот <no-reply@localhost>"
     EMAIL_REPLY_TO: str = ""
@@ -81,6 +91,7 @@ class Settings(BaseSettings):
     EMAIL_TOKEN_TTL_MIN: int = 60
     CONVERSATION_SSE_POLL_INTERVAL_SEC: float = 1.0
     APP_PUBLIC_URL: str = "http://localhost:3000"
+    API_PUBLIC_URL: str = "http://localhost:8000"
 
     ACCESS_TOKEN_TTL_MIN: int = 30
     REFRESH_TOKEN_TTL_DAYS: int = 30

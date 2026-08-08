@@ -153,7 +153,7 @@ async def test_inbound_worker_uses_persisted_message_contract(
         return ChannelWebhookResponse(ok=True, inbound_message_id=parsed_message_id)
 
     monkeypatch.setattr(
-        "app.workers.worker.process_telegram_inbound_message",
+        "app.workers.worker.process_channel_inbound_message",
         fake_process,
     )
 

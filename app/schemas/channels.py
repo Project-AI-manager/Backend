@@ -16,6 +16,35 @@ class ChannelConnectRequest(BaseModel):
     name: str = Field(default="Telegram", max_length=255)
 
 
+class WhatsAppConnectRequest(BaseModel):
+    phone_number_id: str = Field(min_length=1, max_length=64)
+    waba_id: str = Field(min_length=1, max_length=64)
+    access_token: str = Field(min_length=10, max_length=4096)
+    app_secret: str = Field(min_length=8, max_length=512)
+    verify_token: str = Field(min_length=8, max_length=512)
+    name: str = Field(default="WhatsApp", max_length=255)
+    replace_channel_id: UUID | None = None
+
+
+class ChannelProbeResponse(BaseModel):
+    ok: bool
+    display_phone_number: str = ""
+    verified_name: str = ""
+
+
+class AvitoOAuthStartResponse(BaseModel):
+    authorization_url: str
+
+
+class VkConnectRequest(BaseModel):
+    group_id: int = Field(gt=0)
+    access_token: str = Field(min_length=20, max_length=4096)
+    callback_confirmation: str = Field(min_length=1, max_length=255)
+    callback_secret: str = Field(min_length=8, max_length=255)
+    name: str = Field(default="VK", max_length=255)
+    replace_channel_id: UUID | None = None
+
+
 class ChannelResponse(BaseModel):
     id: UUID
     type: str
@@ -34,6 +63,7 @@ class ChannelWebhookResponse(BaseModel):
     inbound_message_id: UUID | None = None
     outbound_message_id: UUID | None = None
     decision: Literal["auto_reply", "escalate"] | None = None
+    processed_count: int = 0
 
 
 class TelegramAccountStartRequest(BaseModel):
