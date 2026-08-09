@@ -78,10 +78,19 @@ async def record_llm_attempt(
     )
     counter = result.scalar_one_or_none()
     if counter is None:
-        counter = UsageCounter(tenant_id=tenant_id, period=period)
+        # SQLAlchemy's Python-side defaults are populated on INSERT/flush, not
+        # when the object is constructed. Accounting increments the values
+        # before that flush, so initialize every numeric field explicitly.
+        counter = UsageCounter(
+            tenant_id=tenant_id,
+            period=period,
+            dialogs_count=0,
+            ai_replies_count=0,
+            expenses_kopecks=0,
+        )
         session.add(counter)
     if outcome == "completed":
-        counter.ai_replies_count += 1
-    counter.expenses_kopecks += cost.client_charge_kopecks
+        counter.ai_replies_count = (counter.ai_replies_count or 0) + 1
+    counter.expenses_kopecks = (counter.expenses_kopecks or 0) + cost.client_charge_kopecks
     await session.flush()
     return event

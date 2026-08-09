@@ -292,8 +292,9 @@ async def process_channel_inbound_message(
     """Run shared ML decisioning for an already persisted channel message.
 
     The stable ``ai:<inbound id>`` external id and the decision marker on the
-    inbound message make completed database work idempotent. Telegram delivery
-    remains at-least-once if a process dies between the API call and DB commit.
+    inbound message make completed database work idempotent. AI decisions and
+    usage are committed before external delivery, so a post-delivery failure
+    cannot erase a reply that the customer has already received.
     """
     inbound = await session.get(Message, message_id)
     if (
@@ -337,28 +338,41 @@ async def process_channel_inbound_message(
         )
     stored_decision = str((inbound.ai_meta or {}).get("decision") or "")
     if (
-        channel.type == "vk"
-        and existing_outbound is not None
+        existing_outbound is not None
         and existing_outbound.status == "pending"
+        and (stored_decision == "auto_reply" or channel.type == "vk")
     ):
         delivered, delivery, provider_message_id = await _deliver_telegram_reply(
             channel,
             _message_chat_id(inbound),
             existing_outbound.text,
+            peer_access_hash=(inbound.ai_meta or {}).get("peer_access_hash"),
             idempotency_key=str(existing_outbound.id),
         )
-        existing_outbound.status = "sent" if delivered else "pending"
+        existing_outbound.status = (
+            "read"
+            if delivered and delivery == "telegram-read"
+            else "sent"
+            if delivered
+            else "failed"
+            if delivery == "telegram-mtproto-failed"
+            else "pending"
+        )
         existing_outbound.ai_meta = {
             **(existing_outbound.ai_meta or {}),
             "delivery": delivery,
-            **({"vk_message_id": provider_message_id} if provider_message_id is not None else {}),
+            **(
+                {f"{channel.type}_message_id": provider_message_id}
+                if provider_message_id is not None
+                else {}
+            ),
         }
-        if provider_message_id is not None:
+        if channel.type in {"whatsapp", "avito", "vk"} and provider_message_id is not None:
             existing_outbound.external_message_id = str(provider_message_id)
         await session.commit()
         return ChannelWebhookResponse(
             ok=True,
-            duplicate=False,
+            duplicate=channel.type != "vk",
             channel_id=channel.id,
             conversation_id=conversation.id,
             inbound_message_id=inbound.id,
@@ -367,7 +381,10 @@ async def process_channel_inbound_message(
         )
     if (
         existing_outbound is not None
-        and (channel.type != "vk" or existing_outbound.status != "pending")
+        and (
+            existing_outbound.status != "pending"
+            or (stored_decision == "auto_reply" and channel.type != "vk")
+        )
     ) or stored_decision == "escalate":
         return ChannelWebhookResponse(
             ok=True,
@@ -497,7 +514,7 @@ async def process_channel_inbound_message(
         )
 
     outbound: Message | None = None
-    vk_decision_checkpointed = False
+    auto_reply_checkpointed = False
     if answer.decision == "auto_reply":
         outbound = existing_outbound
         if outbound is None:
@@ -537,11 +554,10 @@ async def process_channel_inbound_message(
             )
             session.add(outbound)
             await session.flush()
-            if channel.type == "vk":
-                # Provider random_id derives from this durable row id. A crash
-                # after VK accepts the request therefore retries the same key.
-                # Decision/usage state is committed with it so a delivery
-                # retry never re-runs the LLM or loses its accounting trail.
+            if answer.decision == "auto_reply":
+                # Persist the reply, decision, and accounting before calling an
+                # external provider. This prevents a later ledger/DB failure
+                # from rolling back a message already delivered to a customer.
                 conversation.status = "auto"
                 if answer.provider != "guardrail":
                     await record_llm_attempt(
@@ -580,7 +596,7 @@ async def process_channel_inbound_message(
                 conversation.last_message_preview = inbound.text
                 conversation.unread_count += 1
                 await session.commit()
-                vk_decision_checkpointed = True
+                auto_reply_checkpointed = True
         conversation.status = "auto"
         delivered, delivery, provider_message_id = await _deliver_telegram_reply(
             channel,
@@ -614,7 +630,7 @@ async def process_channel_inbound_message(
         await _send_handoff_notice(channel, inbound)
         await notify_escalation_if_due(session, conversation, inbound.text)
 
-    if answer.provider != "guardrail" and not vk_decision_checkpointed:
+    if answer.provider != "guardrail" and not auto_reply_checkpointed:
         await record_llm_attempt(
             session,
             tenant_id=channel.tenant_id,
@@ -629,7 +645,7 @@ async def process_channel_inbound_message(
             metadata={"surface": channel.type, "decision_reason": answer.decision_reason},
         )
 
-    if not vk_decision_checkpointed:
+    if not auto_reply_checkpointed:
         await _persist_decision(
             session,
             conversation,
@@ -660,7 +676,7 @@ async def process_channel_inbound_message(
         if event is not None:
             event.processed = True
 
-    if not vk_decision_checkpointed:
+    if not auto_reply_checkpointed:
         conversation.last_message_at = datetime.now(UTC)
         conversation.last_message_preview = inbound.text
         conversation.unread_count += 1
