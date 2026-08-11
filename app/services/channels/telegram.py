@@ -178,6 +178,20 @@ async def disconnect_channel(
             # Disconnect remains possible when the provider is unavailable;
             # the high-entropy callback path is invalidated locally below.
             pass
+    elif channel.type == "instagram":
+        from app.services.channels.instagram import unsubscribe_instagram_webhook
+
+        try:
+            await unsubscribe_instagram_webhook(channel)
+        except HTTPException:
+            pass
+    elif channel.type == "max":
+        from app.services.channels.max import unsubscribe_max_webhook
+
+        try:
+            await unsubscribe_max_webhook(channel)
+        except HTTPException:
+            pass
 
     channel.status = "disabled"
     channel.external_identity = None
@@ -301,7 +315,8 @@ async def process_channel_inbound_message(
         inbound is None
         or inbound.direction != "inbound"
         or inbound.sender_type != "customer"
-        or (inbound.ai_meta or {}).get("source") not in {"telegram", "whatsapp", "avito", "vk"}
+        or (inbound.ai_meta or {}).get("source")
+        not in {"telegram", "whatsapp", "avito", "vk", "instagram", "max"}
     ):
         raise ValueError("Channel inbound message not found")
 
@@ -309,7 +324,14 @@ async def process_channel_inbound_message(
     if conversation is None:
         raise ValueError("Conversation for inbound message not found")
     channel = await session.get(Channel, conversation.channel_id)
-    if channel is None or channel.type not in {"telegram", "whatsapp", "avito", "vk"}:
+    if channel is None or channel.type not in {
+        "telegram",
+        "whatsapp",
+        "avito",
+        "vk",
+        "instagram",
+        "max",
+    }:
         raise ValueError("Channel for inbound message not found")
 
     external_outbound_id = f"ai:{inbound.id}"
@@ -367,7 +389,10 @@ async def process_channel_inbound_message(
                 else {}
             ),
         }
-        if channel.type in {"whatsapp", "avito", "vk"} and provider_message_id is not None:
+        if (
+            channel.type in {"whatsapp", "avito", "vk", "instagram", "max"}
+            and provider_message_id is not None
+        ):
             existing_outbound.external_message_id = str(provider_message_id)
         await session.commit()
         return ChannelWebhookResponse(
@@ -623,7 +648,10 @@ async def process_channel_inbound_message(
                 else {}
             ),
         }
-        if channel.type in {"whatsapp", "avito", "vk"} and provider_message_id is not None:
+        if (
+            channel.type in {"whatsapp", "avito", "vk", "instagram", "max"}
+            and provider_message_id is not None
+        ):
             outbound.external_message_id = str(provider_message_id)
     else:
         conversation.status = "escalated"
@@ -745,6 +773,24 @@ async def _deliver_telegram_reply(
             result.delivered,
             str(result.metadata.get("delivery") or result.status),
             (result.external_message_id),
+        )
+    if channel.type == "instagram":
+        from app.services.channels.instagram import send_instagram_message
+
+        result = await send_instagram_message(channel, chat_id, text)
+        return (
+            result.delivered,
+            str(result.metadata.get("delivery") or result.status),
+            result.external_message_id,
+        )
+    if channel.type == "max":
+        from app.services.channels.max import send_max_message
+
+        result = await send_max_message(channel, chat_id, text)
+        return (
+            result.delivered,
+            str(result.metadata.get("delivery") or result.status),
+            result.external_message_id,
         )
 
     transport = str((channel.settings or {}).get("transport") or "")

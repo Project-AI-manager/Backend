@@ -15,6 +15,9 @@ from app.schemas.channels import (
     ChannelProbeResponse,
     ChannelResponse,
     ChannelWebhookResponse,
+    InstagramOAuthStartRequest,
+    InstagramOAuthStartResponse,
+    MaxConnectRequest,
     TelegramAccountAuthResponse,
     TelegramAccountConfirmRequest,
     TelegramAccountPasswordRequest,
@@ -32,6 +35,15 @@ from app.services.channels.avito import (
     process_avito_webhook,
     start_avito_oauth,
 )
+from app.services.channels.instagram import (
+    INSTAGRAM_OAUTH_COOKIE,
+    complete_instagram_oauth,
+    consume_instagram_oauth_attempt,
+    process_instagram_webhook,
+    start_instagram_oauth,
+    verify_instagram_webhook,
+)
+from app.services.channels.max import connect_max_channel, process_max_webhook
 from app.services.channels.telegram import (
     connect_channel as connect_channel_service,
 )
@@ -58,6 +70,107 @@ from app.services.channels.whatsapp import (
 )
 
 router = APIRouter()
+
+
+@router.post("/max", response_model=ChannelResponse)
+async def connect_max(
+    body: MaxConnectRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> ChannelResponse:
+    return await connect_max_channel(session, tenant_id_from_user(user), body)
+
+
+@router.post("/webhook/max/{channel_id}", response_model=ChannelWebhookResponse)
+async def max_webhook(
+    channel_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    signature: Annotated[str | None, Header(alias="X-Max-Bot-Api-Secret")] = None,
+) -> ChannelWebhookResponse:
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid MAX webhook JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid MAX webhook payload")
+    return await process_max_webhook(session, channel_id, payload, signature)
+
+
+@router.post("/instagram/oauth/start", response_model=InstagramOAuthStartResponse)
+async def instagram_oauth_start(
+    body: InstagramOAuthStartRequest,
+    user: AdminUser,
+    session: SessionDep,
+    response: Response,
+) -> InstagramOAuthStartResponse:
+    result, browser_binding = await start_instagram_oauth(
+        session,
+        tenant_id_from_user(user),
+        uuid.UUID(str(user["sub"])),
+        settings.API_PUBLIC_URL,
+        replace_channel_id=body.replace_channel_id,
+    )
+    response.set_cookie(
+        INSTAGRAM_OAUTH_COOKIE,
+        browser_binding,
+        max_age=600,
+        httponly=True,
+        secure=settings.API_PUBLIC_URL.lower().startswith("https://"),
+        samesite="lax",
+        path="/api/v1/channels/instagram/oauth/callback",
+    )
+    return result
+
+
+@router.get("/instagram/oauth/callback", response_class=RedirectResponse)
+async def instagram_oauth_callback(
+    request: Request,
+    session: SessionDep,
+    state_token: Annotated[str, Query(alias="state", min_length=16, max_length=4096)],
+    code: Annotated[str | None, Query(min_length=1, max_length=4096)] = None,
+    error: Annotated[str | None, Query(max_length=255)] = None,
+) -> RedirectResponse:
+    browser_binding = request.cookies.get(INSTAGRAM_OAUTH_COOKIE, "")
+    if error or not code:
+        await consume_instagram_oauth_attempt(session, state_token, browser_binding)
+        destination = "cancelled" if error in {"access_denied", "cancelled"} else "error"
+    else:
+        await complete_instagram_oauth(
+            session,
+            code,
+            state_token,
+            browser_binding,
+            settings.API_PUBLIC_URL,
+        )
+        destination = "connected"
+    response = RedirectResponse(
+        f"{settings.app_public_href}/channels?instagram={destination}", status_code=303
+    )
+    response.delete_cookie(
+        INSTAGRAM_OAUTH_COOKIE,
+        path="/api/v1/channels/instagram/oauth/callback",
+    )
+    return response
+
+
+@router.get("/webhook/instagram", response_class=Response)
+async def verify_instagram(
+    mode: Annotated[str, Query(alias="hub.mode")],
+    verify_token: Annotated[str, Query(alias="hub.verify_token")],
+    challenge: Annotated[str, Query(alias="hub.challenge")],
+) -> Response:
+    value = await verify_instagram_webhook(mode, verify_token, challenge)
+    return Response(value, media_type="text/plain")
+
+
+@router.post("/webhook/instagram", response_model=ChannelWebhookResponse)
+async def instagram_webhook(
+    request: Request,
+    session: SessionDep,
+    signature: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
+) -> ChannelWebhookResponse:
+    return await process_instagram_webhook(session, await request.body(), signature)
 
 
 @router.post("/vk", response_model=ChannelResponse)

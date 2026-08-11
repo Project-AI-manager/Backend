@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     VK_API_BASE_URL: str = "https://api.vk.ru/method"
     VK_API_VERSION: str = "5.131"
     VK_DELIVERY_TIMEOUT_SEC: float = 8.0
+    INSTAGRAM_GRAPH_BASE_URL: str = "https://graph.instagram.com"
+    INSTAGRAM_GRAPH_VERSION: str = "v26.0"
+    INSTAGRAM_OAUTH_AUTHORIZE_URL: str = "https://www.instagram.com/oauth/authorize"
+    INSTAGRAM_OAUTH_TOKEN_URL: str = "https://api.instagram.com/oauth/access_token"
+    INSTAGRAM_APP_ID: str = ""
+    INSTAGRAM_APP_SECRET: str = ""
+    INSTAGRAM_WEBHOOK_VERIFY_TOKEN: str = ""
+    INSTAGRAM_DELIVERY_TIMEOUT_SEC: float = 8.0
+    MAX_API_BASE_URL: str = "https://platform-api2.max.ru"
+    MAX_DELIVERY_TIMEOUT_SEC: float = 8.0
 
     EMAIL_FROM: str = "Автопилот <no-reply@localhost>"
     EMAIL_REPLY_TO: str = ""

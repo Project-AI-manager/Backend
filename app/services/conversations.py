@@ -19,6 +19,8 @@ from app.schemas.conversations import (
     ConversationThreadResponse,
 )
 from app.services.channels.avito import send_avito_message
+from app.services.channels.instagram import send_instagram_message
+from app.services.channels.max import send_max_message
 from app.services.channels.telegram import send_telegram_file, send_telegram_message
 from app.services.channels.telegram_mtproto import (
     apply_mtproto_read_watermark,
@@ -473,6 +475,24 @@ async def _deliver_outbound_message(
         if not chat_id:
             return False, False
         result = await send_avito_message(channel, chat_id, message.text)
+        if result.external_message_id:
+            message.external_message_id = result.external_message_id
+        message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
+        return result.delivered, False
+    if channel.type == "instagram":
+        chat_id = _message_chat_id(message)
+        if not chat_id:
+            return False, False
+        result = await send_instagram_message(channel, chat_id, message.text)
+        if result.external_message_id:
+            message.external_message_id = result.external_message_id
+        message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
+        return result.delivered, False
+    if channel.type == "max":
+        chat_id = _message_chat_id(message)
+        if not chat_id:
+            return False, False
+        result = await send_max_message(channel, chat_id, message.text)
         if result.external_message_id:
             message.external_message_id = result.external_message_id
         message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
