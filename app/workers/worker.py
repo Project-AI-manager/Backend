@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.channels.avito import poll_avito_channels
+from app.services.channels.instagram import process_pending_instagram
+from app.services.channels.max import process_pending_max
 from app.services.channels.telegram import process_channel_inbound_message
 from app.services.channels.vk import process_pending_vk
 from app.services.knowledge import reindex_kb_document
@@ -57,6 +59,16 @@ async def process_vk_messages(ctx: dict[str, Any]) -> dict[str, Any]:
         return await process_pending_vk(session)
 
 
+async def process_instagram_messages(ctx: dict[str, Any]) -> dict[str, Any]:
+    async with _session_factory(ctx)() as session:
+        return await process_pending_instagram(session)
+
+
+async def process_max_messages(ctx: dict[str, Any]) -> dict[str, Any]:
+    async with _session_factory(ctx)() as session:
+        return await process_pending_max(session)
+
+
 def _session_factory(ctx: dict[str, Any]) -> Callable[..., Any]:
     factory = ctx.get("session_factory", SessionLocal)
     if not isinstance(factory, async_sessionmaker) and not callable(factory):
@@ -77,6 +89,8 @@ class WorkerSettings:
         reindex_document,
         poll_avito_messages,
         process_vk_messages,
+        process_instagram_messages,
+        process_max_messages,
     ]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     max_tries = 4
@@ -85,4 +99,6 @@ class WorkerSettings:
     cron_jobs = [
         cron(poll_avito_messages, second={10, 40}),
         cron(process_vk_messages, second={5, 20, 35, 50}),
+        cron(process_instagram_messages, second={8, 23, 38, 53}),
+        cron(process_max_messages, second={12, 27, 42, 57}),
     ]

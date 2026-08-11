@@ -55,3 +55,19 @@ class AvitoOAuthAttempt(Base, UUIDMixin, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("user.id"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InstagramOAuthAttempt(Base, UUIDMixin, TimestampMixin):
+    """One-use, browser-bound Instagram OAuth authorization attempt."""
+
+    __tablename__ = "instagram_oauth_attempt"
+
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    browser_binding_hash: Mapped[str] = mapped_column(String(64))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("user.id"), index=True)
+    replace_channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("channel.id"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

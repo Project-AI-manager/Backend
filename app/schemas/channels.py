@@ -36,12 +36,26 @@ class AvitoOAuthStartResponse(BaseModel):
     authorization_url: str
 
 
+class InstagramOAuthStartRequest(BaseModel):
+    replace_channel_id: UUID | None = None
+
+
+class InstagramOAuthStartResponse(BaseModel):
+    authorization_url: str
+
+
 class VkConnectRequest(BaseModel):
     group_id: int = Field(gt=0)
     access_token: str = Field(min_length=20, max_length=4096)
     callback_confirmation: str = Field(min_length=1, max_length=255)
     callback_secret: str = Field(min_length=8, max_length=255)
     name: str = Field(default="VK", max_length=255)
+    replace_channel_id: UUID | None = None
+
+
+class MaxConnectRequest(BaseModel):
+    bot_token: str = Field(min_length=10, max_length=4096)
+    name: str = Field(default="MAX", max_length=255)
     replace_channel_id: UUID | None = None
 
 

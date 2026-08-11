@@ -1,6 +1,6 @@
 """Импорт всех моделей — чтобы Base.metadata видел их при autogenerate Alembic."""
 
-from app.models.channel import AvitoOAuthAttempt, Channel, WebhookEvent
+from app.models.channel import AvitoOAuthAttempt, Channel, InstagramOAuthAttempt, WebhookEvent
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.models.email import EmailOutbox, EmailToken
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
@@ -26,6 +26,7 @@ __all__ = [
     "Channel",
     "WebhookEvent",
     "AvitoOAuthAttempt",
+    "InstagramOAuthAttempt",
     "Customer",
     "CustomerIdentity",
     "Conversation",
