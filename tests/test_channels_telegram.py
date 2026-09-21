@@ -971,6 +971,78 @@ def test_telegram_webhook_escalates_without_auto_reply(
     assert asyncio.run(count_rows(session_factory, Message)) == 1
 
 
+def test_unexpected_retriever_error_escalates_previously_auto_conversation(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory, auto_reply_enabled=True))
+    client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:telegram-token"},
+    )
+    first = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=3101),
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["decision"] == "auto_reply"
+    conversation_id = uuid.UUID(first.json()["conversation_id"])
+
+    async def reset_unread_count() -> None:
+        async with session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            assert conversation is not None
+            assert conversation.status == "auto"
+            conversation.unread_count = 0
+            await session.commit()
+
+    asyncio.run(reset_unread_count())
+
+    async def fail_retriever(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("embedded Qdrant is locked")
+
+    monkeypatch.setattr(
+        "app.services.channels.telegram.get_memory_retriever",
+        fail_retriever,
+    )
+    failed_text = "Поподробнее расскажите о каждом товаре"
+    response = client.post(
+        "/api/v1/channels/webhook/telegram",
+        json=telegram_payload(update_id=3102, text=failed_text),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "escalate"
+
+    async def stored_failure() -> tuple[Conversation, Message, AIDecisionEvent]:
+        async with session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            assert conversation is not None
+            inbound_result = await session.execute(
+                select(Message).where(
+                    Message.conversation_id == conversation_id,
+                    Message.external_message_id == "3102:501",
+                )
+            )
+            inbound = inbound_result.scalar_one()
+            decision_result = await session.execute(
+                select(AIDecisionEvent).where(AIDecisionEvent.message_id == inbound.id)
+            )
+            return conversation, inbound, decision_result.scalar_one()
+
+    conversation, inbound, decision = asyncio.run(stored_failure())
+    assert conversation.status == "escalated"
+    assert conversation.last_message_preview == failed_text
+    assert conversation.unread_count == 1
+    assert inbound.ai_meta["decision"] == "escalate"
+    assert inbound.ai_meta["ai_error"] == "RuntimeError"
+    assert decision.decision == "escalate"
+    assert decision.reason == "provider_error"
+    assert decision.message_id == inbound.id
+
+
 def test_escalation_sends_customer_acknowledgement_and_records_reason(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

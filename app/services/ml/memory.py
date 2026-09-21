@@ -203,7 +203,15 @@ class VectorMemoryRetriever(MemoryRetriever):
 
 
 async def get_memory_retriever(session: AsyncSession, tenant_id: UUID) -> MemoryRetriever:
-    vector_store = get_vector_store()
+    try:
+        vector_store = get_vector_store()
+    except Exception as exc:  # noqa: BLE001 - retrieval must degrade to SQL fallback.
+        log.warning(
+            "vector_store_initialization_failed",
+            error=str(exc),
+            tenant_id=str(tenant_id),
+        )
+        vector_store = None
     if vector_store is None:
         return DatabaseMemoryRetriever(session)
     ai_config = await session.get(TenantAIConfig, tenant_id)

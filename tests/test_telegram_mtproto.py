@@ -650,7 +650,13 @@ def test_mtproto_ingest_waits_after_persisting_before_ai_processing(
         return SimpleNamespace(id=uuid.uuid4())
 
     async def fake_conversation(*_args: object, **_kwargs: object) -> object:
-        return SimpleNamespace(id=uuid.uuid4())
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            status="open",
+            last_message_at=None,
+            last_message_preview="",
+            unread_count=0,
+        )
 
     async def fake_sleep(delay: float) -> None:
         events.append(f"sleep:{delay}")
@@ -684,6 +690,154 @@ def test_mtproto_ingest_waits_after_persisting_before_ai_processing(
     )
 
     assert events[-3:] == ["committed", "sleep:5", "processed"]
+
+
+@pytest.mark.parametrize(
+    ("ai_meta", "expected_processed_ids"),
+    [
+        ({"source": "telegram", "transport": "mtproto"}, [uuid.UUID(int=42)]),
+        (
+            {
+                "source": "telegram",
+                "transport": "mtproto",
+                "decision": "auto_reply",
+            },
+            [],
+        ),
+    ],
+    ids=["unfinished", "completed"],
+)
+def test_mtproto_duplicate_retries_only_inbound_without_ai_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    ai_meta: dict[str, str],
+    expected_processed_ids: list[uuid.UUID],
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    conversation_id = uuid.UUID(int=41)
+    message_id = uuid.UUID(int=42)
+    existing_message = SimpleNamespace(id=message_id, ai_meta=ai_meta)
+    processed_ids: list[uuid.UUID] = []
+
+    class FakeSession:
+        async def execute(self, _query: object) -> object:
+            class Result:
+                @staticmethod
+                def scalar_one_or_none() -> object:
+                    return existing_message
+
+            return Result()
+
+        async def flush(self) -> None:
+            pass
+
+    async def fake_customer(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def fake_conversation(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(id=conversation_id)
+
+    async def fake_process(_session: object, inbound_id: uuid.UUID) -> None:
+        processed_ids.append(inbound_id)
+
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_customer", fake_customer)
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_conversation", fake_conversation)
+    monkeypatch.setattr(telegram_mtproto, "process_telegram_inbound_message", fake_process)
+
+    result = asyncio.run(
+        telegram_mtproto.ingest_mtproto_message(
+            FakeSession(),  # type: ignore[arg-type]
+            SimpleNamespace(id=uuid.uuid4(), tenant_id=TENANT_ID),  # type: ignore[arg-type]
+            SimpleNamespace(
+                peer_id=7001,
+                peer_access_hash=None,
+                sender_id=7001,
+                message_id=42,
+                text="Расскажите о каждом товаре",
+                sender_name="Клиент",
+                avatar_bytes=None,
+                avatar_checked=False,
+            ),
+        )
+    )
+
+    assert result == conversation_id
+    assert processed_ids == expected_processed_ids
+
+
+def test_mtproto_ingest_marks_conversation_open_before_ai_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.channels import telegram_mtproto
+
+    conversation = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="auto",
+        last_message_preview="Предыдущий ответ",
+        unread_count=0,
+    )
+    persisted_message: object | None = None
+    commits = 0
+
+    class FakeSession:
+        def add(self, value: object) -> None:
+            nonlocal persisted_message
+            persisted_message = value
+
+        async def flush(self) -> None:
+            pass
+
+        async def execute(self, _query: object) -> object:
+            class Result:
+                @staticmethod
+                def scalar_one_or_none() -> None:
+                    return None
+
+            return Result()
+
+        async def flush(self) -> None:
+            assert persisted_message is not None
+
+        async def commit(self) -> None:
+            nonlocal commits
+            commits += 1
+
+    async def fake_customer(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def fake_conversation(*_args: object, **_kwargs: object) -> object:
+        return conversation
+
+    async def fake_process(_session: object, inbound_id: uuid.UUID) -> None:
+        assert commits == 1
+        assert persisted_message is not None
+        assert inbound_id == persisted_message.id  # type: ignore[union-attr]
+        assert conversation.status == "open"
+        assert conversation.last_message_preview == "Расскажите о каждом товаре"
+        assert conversation.unread_count == 1
+
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_customer", fake_customer)
+    monkeypatch.setattr(telegram_mtproto, "_get_or_create_conversation", fake_conversation)
+    monkeypatch.setattr(telegram_mtproto, "process_telegram_inbound_message", fake_process)
+
+    result = asyncio.run(
+        telegram_mtproto.ingest_mtproto_message(
+            FakeSession(),  # type: ignore[arg-type]
+            SimpleNamespace(id=uuid.uuid4(), tenant_id=TENANT_ID),  # type: ignore[arg-type]
+            SimpleNamespace(
+                peer_id=7001,
+                peer_access_hash=None,
+                sender_id=7001,
+                message_id=43,
+                text="Расскажите о каждом товаре",
+                sender_name="Клиент",
+                avatar_bytes=None,
+                avatar_checked=False,
+            ),
+        )
+    )
+
+    assert result == conversation.id
 
 
 def test_listener_acknowledges_read_then_types_until_processing_finishes(

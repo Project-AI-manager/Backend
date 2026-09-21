@@ -45,6 +45,13 @@ def test_local_defaults_remain_available_for_development() -> None:
     assert local.allow_insecure_telegram_webhook is True
 
 
+def test_vercel_deployment_origin_regex_is_scoped_to_frontend_project() -> None:
+    settings = Settings(_env_file=None)
+
+    assert "frontend-" in settings.cors_origin_regex
+    assert "timurzakirov239s-projects" in settings.cors_origin_regex
+
+
 @pytest.mark.parametrize(
     ("configured", "href", "display"),
     [

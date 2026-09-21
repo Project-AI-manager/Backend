@@ -286,7 +286,8 @@ def test_oauth_cancel_redirects_and_consumes_state(
     state_token = parse_qs(urlparse(start.json()["authorization_url"]).query)["state"][0]
     binding = start.cookies["avito_oauth_binding"]
     assert "HttpOnly" in start.headers["set-cookie"]
-    assert "SameSite=lax" in start.headers["set-cookie"]
+    assert "SameSite=none" in start.headers["set-cookie"]
+    assert "Secure" in start.headers["set-cookie"]
     client.cookies.set(
         "avito_oauth_binding",
         binding,

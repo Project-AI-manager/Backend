@@ -40,6 +40,7 @@ from app.schemas.channels import (
 )
 from app.services.channels.base import NormalizedMessage
 from app.services.channels.telegram import (
+    _checkpoint_inbound_receipt,
     _get_or_create_conversation,
     _get_or_create_customer,
     process_telegram_inbound_message,
@@ -544,7 +545,13 @@ async def ingest_mtproto_message(
             Message.external_message_id == normalized.external_message_id,
         )
     )
-    if existing.scalar_one_or_none() is not None:
+    existing_message = existing.scalar_one_or_none()
+    if existing_message is not None:
+        # Another listener may have persisted this Telegram update and then
+        # crashed before the AI decision was committed. Re-delivery must resume
+        # that durable, unfinished inbound instead of treating it as complete.
+        if not (existing_message.ai_meta or {}).get("decision"):
+            await process_telegram_inbound_message(session, existing_message.id)
         return conversation.id
     message = Message(
         tenant_id=channel.tenant_id,
@@ -569,6 +576,11 @@ async def ingest_mtproto_message(
         },
     )
     session.add(message)
+    # Persist inbox state before retrieval/LLM work. If processing is cancelled
+    # or the process exits, the UI must show the customer's latest message as
+    # awaiting attention rather than retain a stale "answered" state.
+    await session.flush()
+    await _checkpoint_inbound_receipt(session, conversation, message)
     await session.commit()
     if auto_reply_delay_sec > 0:
         await asyncio.sleep(auto_reply_delay_sec)

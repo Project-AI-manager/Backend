@@ -123,6 +123,10 @@ class Settings(BaseSettings):
         return origins
 
     @property
+    def cors_origin_regex(self) -> str:
+        return r"^https://frontend-[a-z0-9-]+-timurzakirov239s-projects\.vercel\.app$"
+
+    @property
     def is_local_or_test(self) -> bool:
         return self.APP_ENV.strip().lower() in {"local", "test"}
 

@@ -72,6 +72,15 @@ from app.services.channels.whatsapp import (
 router = APIRouter()
 
 
+def _oauth_cookie_options() -> dict[str, Any]:
+    secure = settings.API_PUBLIC_URL.lower().startswith("https://")
+    return {
+        "secure": secure,
+        "samesite": "none" if secure else "lax",
+        "httponly": True,
+    }
+
+
 @router.post("/max", response_model=ChannelResponse)
 async def connect_max(
     body: MaxConnectRequest,
@@ -115,10 +124,8 @@ async def instagram_oauth_start(
         INSTAGRAM_OAUTH_COOKIE,
         browser_binding,
         max_age=600,
-        httponly=True,
-        secure=settings.API_PUBLIC_URL.lower().startswith("https://"),
-        samesite="lax",
         path="/api/v1/channels/instagram/oauth/callback",
+        **_oauth_cookie_options(),
     )
     return result
 
@@ -150,6 +157,8 @@ async def instagram_oauth_callback(
     response.delete_cookie(
         INSTAGRAM_OAUTH_COOKIE,
         path="/api/v1/channels/instagram/oauth/callback",
+        secure=_oauth_cookie_options()["secure"],
+        samesite=_oauth_cookie_options()["samesite"],
     )
     return response
 
@@ -214,10 +223,8 @@ async def avito_oauth_start(
         AVITO_OAUTH_COOKIE,
         browser_binding,
         max_age=600,
-        httponly=True,
-        secure=settings.API_PUBLIC_URL.lower().startswith("https://"),
-        samesite="lax",
         path="/api/v1/channels/avito/oauth/callback",
+        **_oauth_cookie_options(),
     )
     return result
 
@@ -249,6 +256,8 @@ async def avito_oauth_callback(
     response.delete_cookie(
         AVITO_OAUTH_COOKIE,
         path="/api/v1/channels/avito/oauth/callback",
+        secure=_oauth_cookie_options()["secure"],
+        samesite=_oauth_cookie_options()["samesite"],
     )
     return response
 

@@ -38,6 +38,8 @@ HANDOFF_MESSAGE = (
     "Я передал ваш вопрос менеджеру. Он подключится к диалогу и ответит, как только сможет."
 )
 
+_INBOUND_RECEIPT_MARKER = "conversation_receipt_recorded"
+
 
 class TelegramAdapter(ChannelAdapter):
     type = "telegram"
@@ -334,6 +336,11 @@ async def process_channel_inbound_message(
     }:
         raise ValueError("Channel for inbound message not found")
 
+    stored_decision = str((inbound.ai_meta or {}).get("decision") or "")
+    if not stored_decision and not (inbound.ai_meta or {}).get(_INBOUND_RECEIPT_MARKER):
+        await _checkpoint_inbound_receipt(session, conversation, inbound)
+        await session.commit()
+
     external_outbound_id = f"ai:{inbound.id}"
     existing_result = await session.execute(
         select(Message).where(
@@ -358,7 +365,6 @@ async def process_channel_inbound_message(
             ),
             None,
         )
-    stored_decision = str((inbound.ai_meta or {}).get("decision") or "")
     if (
         existing_outbound is not None
         and existing_outbound.status == "pending"
@@ -452,9 +458,6 @@ async def process_channel_inbound_message(
     )
     if conversation.status == "escalated" and not force_ai_retry:
         inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": "escalate"}
-        conversation.last_message_at = datetime.now(UTC)
-        conversation.last_message_preview = inbound.text
-        conversation.unread_count += 1
         await _persist_decision(
             session, conversation, inbound, "escalate", "waiting_for_manager", 0.0
         )
@@ -498,7 +501,9 @@ async def process_channel_inbound_message(
                 auto_reply_enabled=ai_config.auto_reply_enabled if ai_config else False,
             )
         )
-    except (LLMProviderConfigurationError, LLMProviderRequestError, httpx.HTTPError) as exc:
+    except Exception as exc:  # noqa: BLE001 - an inbound must never remain falsely answered.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         log.warning(
             "channel_ai_processing_failed",
             tenant_id=str(channel.tenant_id),
@@ -511,9 +516,6 @@ async def process_channel_inbound_message(
             "ai_error": type(exc).__name__,
         }
         conversation.status = "escalated"
-        conversation.last_message_at = datetime.now(UTC)
-        conversation.last_message_preview = inbound.text
-        conversation.unread_count += 1
         await record_llm_attempt(
             session,
             tenant_id=channel.tenant_id,
@@ -617,9 +619,6 @@ async def process_channel_inbound_message(
                     "sources": [source.id for source in answer.sources],
                     "decision_reason": answer.decision_reason,
                 }
-                conversation.last_message_at = datetime.now(UTC)
-                conversation.last_message_preview = inbound.text
-                conversation.unread_count += 1
                 await session.commit()
                 auto_reply_checkpointed = True
         conversation.status = "auto"
@@ -704,10 +703,6 @@ async def process_channel_inbound_message(
         if event is not None:
             event.processed = True
 
-    if not auto_reply_checkpointed:
-        conversation.last_message_at = datetime.now(UTC)
-        conversation.last_message_preview = inbound.text
-        conversation.unread_count += 1
     await session.commit()
     await session.refresh(inbound)
     if outbound is not None:
@@ -1005,6 +1000,25 @@ async def _get_or_create_conversation(
             existing.status = "open"
             existing.assignee_user_id = None
         return existing
+
+
+async def _checkpoint_inbound_receipt(
+    session: AsyncSession,
+    conversation: Conversation,
+    inbound: Message,
+) -> None:
+    """Durably expose a new customer message before AI processing begins."""
+    if (inbound.ai_meta or {}).get(_INBOUND_RECEIPT_MARKER):
+        return
+    if conversation.status != "escalated":
+        conversation.status = "open"
+    conversation.last_message_at = inbound.created_at or datetime.now(UTC)
+    conversation.last_message_preview = inbound.text[:512]
+    conversation.unread_count = (conversation.unread_count or 0) + 1
+    inbound.ai_meta = {
+        **(inbound.ai_meta or {}),
+        _INBOUND_RECEIPT_MARKER: True,
+    }
 
 
 async def _persist_decision(
