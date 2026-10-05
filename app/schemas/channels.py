@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-ChannelType = Literal["telegram"]
+ChannelType = Literal["telegram", "telegram_bot"]
 
 
 class ChannelConnectRequest(BaseModel):
@@ -14,6 +14,11 @@ class ChannelConnectRequest(BaseModel):
     bot_token: str = Field(min_length=10)
     bot_username: str = Field(default="", max_length=255)
     name: str = Field(default="Telegram", max_length=255)
+
+
+class TelegramBotConnectRequest(BaseModel):
+    bot_token: str = Field(min_length=10, max_length=512)
+    name: str = Field(default="Telegram-бот", max_length=255)
 
 
 class WhatsAppConnectRequest(BaseModel):
@@ -24,6 +29,17 @@ class WhatsAppConnectRequest(BaseModel):
     verify_token: str = Field(min_length=8, max_length=512)
     name: str = Field(default="WhatsApp", max_length=255)
     replace_channel_id: UUID | None = None
+
+
+class WhatsAppPersonalQRStartResponse(BaseModel):
+    channel_id: UUID
+    status: Literal["waiting", "active", "expired", "error", "disconnected"]
+    qr: str = ""
+    error: str = ""
+
+
+class WhatsAppPersonalQRStatusResponse(WhatsAppPersonalQRStartResponse):
+    pass
 
 
 class ChannelProbeResponse(BaseModel):

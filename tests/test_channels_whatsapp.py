@@ -603,6 +603,69 @@ def test_connect_rejects_invalid_meta_credentials_without_creating_channel(
     assert asyncio.run(channel_count()) == 0
 
 
+def test_connect_allows_multiple_business_phone_numbers_for_same_tenant(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+    phone_numbers = {
+        "123456789": {"display_phone_number": "+7 999 000-11-22", "verified_name": "Shop A"},
+        "987654321": {"display_phone_number": "+7 999 000-33-44", "verified_name": "Shop B"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer long-lived-access-token"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": phone_number_id, **details}
+                    for phone_number_id, details in phone_numbers.items()
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original_client(
+            transport=transport, timeout=kwargs.get("timeout")
+        ),
+    )
+
+    created_channels = []
+    for phone_number_id, waba_id in (("123456789", "waba-a"), ("987654321", "waba-b")):
+        response = client.post(
+            "/api/v1/channels/whatsapp",
+            headers=auth_headers(),
+            json={
+                "phone_number_id": phone_number_id,
+                "waba_id": waba_id,
+                "access_token": "long-lived-access-token",
+                "app_secret": APP_SECRET,
+                "verify_token": VERIFY_TOKEN,
+                "name": f"WhatsApp {waba_id}",
+            },
+        )
+        assert response.status_code == 200, response.text
+        created_channels.append(response.json())
+
+    assert created_channels[0]["id"] != created_channels[1]["id"]
+    assert created_channels[0]["settings"]["phone_number_id"] == "123456789"
+    assert created_channels[1]["settings"]["phone_number_id"] == "987654321"
+
+    async def channel_count() -> int:
+        async with session_factory() as session:
+            return int(
+                (await session.execute(select(func.count()).select_from(Channel))).scalar_one()
+            )
+
+    assert asyncio.run(channel_count()) == 2
+
+
 def test_reconnect_rotates_credentials_for_the_owned_phone_number(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],

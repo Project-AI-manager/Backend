@@ -15,6 +15,11 @@ class AnalyticsDailySeriesItem(BaseModel):
     dialogs: int
 
 
+class AnalyticsChannelBreakdownItem(BaseModel):
+    channel_type: str
+    count: int
+
+
 class AnalyticsOverviewResponse(BaseModel):
     date_from: date
     date_to: date
@@ -35,5 +40,6 @@ class AnalyticsOverviewResponse(BaseModel):
     knowledge_documents_ready: int
     knowledge_chunks_count: int
     pending_candidates_count: int
+    channels_breakdown: list[AnalyticsChannelBreakdownItem]
     status_breakdown: list[AnalyticsStatusBreakdownItem]
     daily_series: list[AnalyticsDailySeriesItem]

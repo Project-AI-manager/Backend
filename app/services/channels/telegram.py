@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -24,6 +25,7 @@ from app.schemas.channels import (
     ChannelConnectRequest,
     ChannelResponse,
     ChannelWebhookResponse,
+    TelegramBotConnectRequest,
 )
 from app.services.billing.ledger import record_llm_attempt
 from app.services.channels.base import ChannelAdapter, NormalizedMessage
@@ -169,6 +171,14 @@ async def disconnect_channel(
         from app.services.channels.telegram_mtproto import cancel_pending_account_connection
 
         await cancel_pending_account_connection(channel.id)
+    elif channel.type == "whatsapp" and (channel.settings or {}).get("transport") == "whatsmeow":
+        from app.services.channels.whatsapp_personal import stop_personal_bridge_session
+
+        try:
+            await stop_personal_bridge_session(channel.id)
+        except HTTPException:
+            # Keep local disconnect possible when the optional test bridge is offline.
+            pass
     elif channel.type == "avito":
         from app.services.channels.avito import unsubscribe_avito_webhook
 
@@ -209,6 +219,11 @@ async def connect_channel(
         select(Channel).where(Channel.tenant_id == tenant_id, Channel.type == body.type)
     )
     channel = result.scalar_one_or_none()
+    if channel is not None and (channel.settings or {}).get("transport") == "mtproto":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Personal Telegram is connected; connect a bot through the dedicated bot endpoint",
+        )
     if channel is None:
         channel = Channel(tenant_id=tenant_id, type=body.type)
         session.add(channel)
@@ -228,15 +243,109 @@ async def connect_channel(
     return _channel_response(channel)
 
 
+async def connect_telegram_bot(
+    session: AsyncSession,
+    tenant_id: UUID,
+    body: TelegramBotConnectRequest,
+) -> ChannelResponse:
+    """Create/update a bot channel without touching the personal MTProto row."""
+    try:
+        bot_info = await _call_telegram_bot_api(body.bot_token, "getMe")
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in {401, 404}:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Telegram rejected this bot token"
+            ) from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Telegram Bot API is unavailable") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Telegram Bot API is unavailable") from exc
+    bot = bot_info.get("result") if isinstance(bot_info, dict) else None
+    if not isinstance(bot, dict) or bot_info.get("ok") is not True:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Telegram rejected this bot token")
+
+    result = await session.execute(
+        select(Channel).where(Channel.tenant_id == tenant_id, Channel.type == "telegram_bot")
+    )
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        channel = Channel(tenant_id=tenant_id, type="telegram_bot")
+        session.add(channel)
+
+    channel.name = body.name.strip() or "Telegram-бот"
+    channel.status = "pending"
+    channel.external_identity = None
+    channel.credentials_encrypted = _store_bot_token(body.bot_token)
+    webhook_secret = _webhook_secret(channel.settings)
+    webhook_path = f"/api/v1/channels/webhook/telegram_bot/{webhook_secret}"
+    webhook_url = _public_https_webhook_url(webhook_path)
+    webhook_ready = False
+    if webhook_url:
+        try:
+            webhook_result = await _call_telegram_bot_api(
+                body.bot_token,
+                "setWebhook",
+                {"url": webhook_url, "secret_token": webhook_secret, "allowed_updates": ["message"]},
+            )
+            webhook_ready = isinstance(webhook_result, dict) and webhook_result.get("ok") is True
+        except (httpx.HTTPError, ValueError):
+            webhook_ready = False
+
+    channel.status = "active" if webhook_ready else "pending"
+    channel.settings = {
+        "webhook_path": webhook_path,
+        "webhook_secret": webhook_secret,
+        "transport": "bot_api",
+        "bot_username": str(bot.get("username") or ""),
+        "webhook_configured": webhook_ready,
+    }
+    await session.commit()
+    await session.refresh(channel)
+    return _channel_response(channel)
+
+
+async def _call_telegram_bot_api(
+    token: str,
+    method: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=settings.TELEGRAM_DELIVERY_TIMEOUT_SEC) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{token}/{method}",
+            json=payload or {},
+        )
+        response.raise_for_status()
+        data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Unexpected Telegram Bot API response")
+    return data
+
+
+def _public_https_webhook_url(path: str) -> str | None:
+    base_url = settings.API_PUBLIC_URL.strip().rstrip("/")
+    parsed = urlsplit(base_url)
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme != "https"
+        or not host
+        or host in {"localhost", "127.0.0.1", "::1"}
+        or host.endswith(".local")
+    ):
+        return None
+    return f"{base_url}{path}"
+
+
 async def process_telegram_webhook(
     session: AsyncSession,
     payload: dict[str, Any],
     *,
     webhook_secret: str | None = None,
+    channel_type: str = "telegram",
 ) -> ChannelWebhookResponse:
     adapter = TelegramAdapter()
     normalized = adapter.parse_inbound(payload)
-    channel = await _active_telegram_channel(session, webhook_secret=webhook_secret)
+    channel = await _active_telegram_channel(
+        session, webhook_secret=webhook_secret, channel_type=channel_type
+    )
     channel_id = channel.id
 
     event = WebhookEvent(
@@ -433,7 +542,7 @@ async def process_channel_inbound_message(
         await _persist_decision(
             session, conversation, inbound, "escalate", "waiting_for_manager", 0.0
         )
-        await _send_handoff_notice(channel, inbound)
+        await _send_handoff_notice(session, channel, conversation, inbound)
         await notify_escalation_if_due(session, conversation, inbound.text)
         await session.commit()
         return ChannelWebhookResponse(
@@ -501,7 +610,7 @@ async def process_channel_inbound_message(
             metadata={"surface": channel.type},
         )
         await _persist_decision(session, conversation, inbound, "escalate", "provider_error", 0.0)
-        await _send_handoff_notice(channel, inbound)
+        await _send_handoff_notice(session, channel, conversation, inbound)
         await notify_escalation_if_due(session, conversation, inbound.text)
         await session.commit()
         return ChannelWebhookResponse(
@@ -627,7 +736,7 @@ async def process_channel_inbound_message(
             outbound.external_message_id = str(provider_message_id)
     else:
         conversation.status = "escalated"
-        await _send_handoff_notice(channel, inbound)
+        await _send_handoff_notice(session, channel, conversation, inbound)
         await notify_escalation_if_due(session, conversation, inbound.text)
 
     if answer.provider != "guardrail" and not auto_reply_checkpointed:
@@ -715,6 +824,15 @@ async def _deliver_telegram_reply(
     create a circular import.
     """
     if channel.type == "whatsapp":
+        if (channel.settings or {}).get("transport") == "whatsmeow":
+            from app.services.channels.whatsapp_personal import send_personal_whatsapp_message
+
+            result = await send_personal_whatsapp_message(channel, chat_id, text)
+            return (
+                result.delivered,
+                str(result.metadata.get("delivery") or result.status),
+                result.external_message_id,
+            )
         from app.services.channels.whatsapp import send_whatsapp_message
 
         result = await send_whatsapp_message(channel, chat_id, text)
@@ -841,9 +959,10 @@ async def _active_telegram_channel(
     session: AsyncSession,
     *,
     webhook_secret: str | None,
+    channel_type: str = "telegram",
 ) -> Channel:
     result = await session.execute(
-        select(Channel).where(Channel.type == "telegram", Channel.status == "active")
+        select(Channel).where(Channel.type == channel_type, Channel.status == "active")
     )
     channels = result.scalars().all()
     if webhook_secret:
@@ -999,16 +1118,89 @@ def _decision_explanation(reason: str) -> str:
     }.get(reason, "Запрос безопасно передан менеджеру.")
 
 
-async def _send_handoff_notice(channel: Channel, inbound: Message) -> None:
-    try:
-        await _deliver_telegram_reply(
-            channel,
-            _message_chat_id(inbound),
-            HANDOFF_MESSAGE,
-            peer_access_hash=(inbound.ai_meta or {}).get("peer_access_hash"),
-            idempotency_key=f"handoff:{inbound.id}",
+async def _send_handoff_notice(
+    session: AsyncSession,
+    channel: Channel,
+    conversation: Conversation,
+    inbound: Message,
+) -> None:
+    result = await session.execute(
+        select(Message).where(
+            Message.conversation_id == conversation.id,
+            Message.direction == "outbound",
+            Message.sender_type == "ai",
         )
-    except (HTTPException, httpx.HTTPError, ValueError) as exc:
+    )
+    handoff = next(
+        (
+            item
+            for item in result.scalars().all()
+            if (item.ai_meta or {}).get("source") == "handoff"
+        ),
+        None,
+    )
+    if handoff is not None and handoff.status in {"sent", "pending", "read"}:
+        return
+    if handoff is None:
+        handoff = Message(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+            direction="outbound",
+            sender_type="ai",
+            sender_user_id=None,
+            text=HANDOFF_MESSAGE,
+            attachments={},
+            external_message_id=f"handoff:{inbound.id}",
+            status="pending",
+            ai_meta={
+                "source": "handoff",
+                "decision": "escalate",
+                "delivery": "delivery-pending",
+                "idempotency_key": f"handoff:{conversation.id}",
+                "chat_id": _message_chat_id(inbound),
+                **(
+                    {"peer_access_hash": inbound.ai_meta["peer_access_hash"]}
+                    if isinstance((inbound.ai_meta or {}).get("peer_access_hash"), int)
+                    else {}
+                ),
+            },
+        )
+        session.add(handoff)
+        # Save the acknowledgement before contacting the channel provider, so
+        # a DB error cannot erase a reply that was already delivered.
+        await session.commit()
+    try:
+        delivered, delivery, provider_message_id = await _deliver_telegram_reply(
+            channel,
+            str((handoff.ai_meta or {}).get("chat_id") or _message_chat_id(inbound)),
+            handoff.text,
+            peer_access_hash=(inbound.ai_meta or {}).get("peer_access_hash"),
+            idempotency_key=f"handoff:{conversation.id}",
+        )
+        handoff.status = (
+            "sent"
+            if delivered
+            else "pending"
+            if delivery == "delivery-disabled"
+            else "failed"
+        )
+        handoff.ai_meta = {
+            **(handoff.ai_meta or {}),
+            "delivery": delivery,
+            **(
+                {f"{channel.type}_message_id": provider_message_id}
+                if provider_message_id is not None
+                else {}
+            ),
+        }
+        if channel.type in {"whatsapp", "avito", "vk"} and provider_message_id is not None:
+            handoff.external_message_id = str(provider_message_id)
+    except Exception as exc:
+        handoff.status = "failed"
+        handoff.ai_meta = {
+            **(handoff.ai_meta or {}),
+            "delivery": "delivery-error",
+        }
         log.warning(
             "channel_handoff_notice_failed",
             conversation_id=str(inbound.conversation_id),
@@ -1027,7 +1219,7 @@ async def _escalate_with_customer_notice(
     conversation.status = "escalated"
     inbound.ai_meta = {**(inbound.ai_meta or {}), "decision": "escalate", "decision_reason": reason}
     await _persist_decision(session, conversation, inbound, "escalate", reason, 0.0)
-    await _send_handoff_notice(channel, inbound)
+    await _send_handoff_notice(session, channel, conversation, inbound)
     await notify_escalation_if_due(session, conversation, inbound.text)
 
 

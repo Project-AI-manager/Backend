@@ -158,24 +158,19 @@ async def archive_kb_document(
     document = await _get_document(session, tenant_id, document_id)
     try:
         vector_store = get_vector_store()
-    except Exception as exc:  # noqa: BLE001 - archive must not depend on vector infra.
-        vector_store = None
-        log.warning(
-            "knowledge_vector_delete_failed",
-            error=str(exc),
-            tenant_id=str(tenant_id),
-            document_id=str(document.id),
-        )
+    except Exception as exc:  # noqa: BLE001 - keep the SQL and vector states consistent.
+        raise _knowledge_indexing_error(exc) from exc
     if vector_store is not None:
         try:
             await vector_store.delete_document(tenant_id=tenant_id, document_id=document.id)
-        except Exception as exc:  # noqa: BLE001 - SQL status remains the source of truth.
+        except Exception as exc:  # noqa: BLE001 - keep the document available for a retry.
             log.warning(
                 "knowledge_vector_delete_failed",
                 error=str(exc),
                 tenant_id=str(tenant_id),
                 document_id=str(document.id),
             )
+            raise _knowledge_indexing_error(exc) from exc
     document.status = "archived"
     await session.commit()
     await session.refresh(document)
@@ -329,6 +324,8 @@ async def index_kb_document(
 
 def _knowledge_indexing_error(exc: Exception) -> KnowledgeIndexingError:
     """Translate infrastructure/provider failures into a safe Russian API error."""
+    if isinstance(exc, KnowledgeIndexingError):
+        return exc
     message = str(exc).lower()
     if (
         "connection" in message
@@ -421,7 +418,14 @@ async def _index_chunks(
 ) -> None:
     try:
         vector_store = get_vector_store()
-        if vector_store is None or not chunks:
+        if vector_store is None:
+            if raise_errors:
+                raise KnowledgeIndexingError(
+                    "Векторное хранилище отключено на сервере",
+                    code="vector_store_disabled",
+                )
+            return
+        if not chunks:
             return
         ai_config = await session.get(TenantAIConfig, document.tenant_id)
         embedder = get_embedder(ai_config.embedding_model if ai_config else None)

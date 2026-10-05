@@ -463,7 +463,14 @@ async def _deliver_outbound_message(
         chat_id = _message_chat_id(message)
         if not chat_id:
             return False, False
-        result = await send_whatsapp_message(channel, chat_id, message.text)
+        if (channel.settings or {}).get("transport") == "whatsmeow":
+            from app.services.channels.whatsapp_personal import (
+                send_personal_whatsapp_message,
+            )
+
+            result = await send_personal_whatsapp_message(channel, chat_id, message.text)
+        else:
+            result = await send_whatsapp_message(channel, chat_id, message.text)
         if result.external_message_id:
             message.external_message_id = result.external_message_id
         message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
@@ -491,7 +498,7 @@ async def _deliver_outbound_message(
             message.external_message_id = result.external_message_id
         message.ai_meta = {**(message.ai_meta or {}), **result.metadata}
         return result.delivered, False
-    if channel.type != "telegram":
+    if channel.type not in {"telegram", "telegram_bot"}:
         return False, False
 
     chat_id = _message_chat_id(message)
@@ -529,7 +536,7 @@ async def _deliver_outbound_attachment(
     file_path: Path,
     metadata: dict[str, object],
 ) -> tuple[bool, int | None, bool]:
-    if channel.type != "telegram":
+    if channel.type not in {"telegram", "telegram_bot"}:
         return False, None, False
     chat_id = _message_chat_id(message)
     if not chat_id:

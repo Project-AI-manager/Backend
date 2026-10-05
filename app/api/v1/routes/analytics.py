@@ -27,6 +27,7 @@ from app.models.conversation import Conversation, Customer, CustomerIdentity, Me
 from app.models.knowledge import KbCandidate, KbChunk, KbDocument
 from app.models.ops import AIUsageEvent, Plan, Subscription, UsageCounter
 from app.schemas.analytics import (
+    AnalyticsChannelBreakdownItem,
     AnalyticsDailySeriesItem,
     AnalyticsOverviewResponse,
     AnalyticsStatusBreakdownItem,
@@ -104,6 +105,11 @@ async def overview(
         tenant_id,
         active_conversation_ids,
     )
+    channels = await _channels(
+        session,
+        tenant_id,
+        {conversation.channel_id for conversation in conversations},
+    )
     dialogs_used, dialogs_limit = await _usage_and_limit(session, tenant_id)
     (
         knowledge_documents_ready,
@@ -124,6 +130,12 @@ async def overview(
     confidence_values = [
         message.confidence for message in ai_replies if isinstance(message.confidence, (int, float))
     ]
+    channel_counts = Counter(
+        channels[conversation.channel_id].type
+        if conversation.channel_id in channels
+        else "unknown"
+        for conversation in conversations
+    )
 
     return AnalyticsOverviewResponse(
         date_from=date_from,
@@ -147,6 +159,12 @@ async def overview(
         knowledge_documents_ready=knowledge_documents_ready,
         knowledge_chunks_count=knowledge_chunks_count,
         pending_candidates_count=pending_candidates_count,
+        channels_breakdown=[
+            AnalyticsChannelBreakdownItem(channel_type=channel_type, count=count)
+            for channel_type, count in sorted(
+                channel_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
         status_breakdown=[
             AnalyticsStatusBreakdownItem(status=status, count=count)
             for status, count in sorted(status_counts.items())

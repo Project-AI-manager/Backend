@@ -232,6 +232,46 @@ def test_connect_and_list_telegram_channel(
     assert listed.json()[0]["id"] == data["id"]
 
 
+def test_connect_telegram_bot_keeps_personal_account_channel_separate(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(seed_tenant(session_factory))
+
+    async def fake_bot_api(token: str, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        assert token == "9876543210:bot-placeholder"
+        assert method == "getMe"
+        return {"ok": True, "result": {"id": 9876543210, "username": "shop_bot"}}
+
+    monkeypatch.setattr("app.services.channels.telegram._call_telegram_bot_api", fake_bot_api)
+    monkeypatch.setattr("app.services.channels.telegram._public_https_webhook_url", lambda path: None)
+    personal = client.post(
+        "/api/v1/channels",
+        headers=auth_headers(),
+        json={"type": "telegram", "bot_token": "1234567890:personal-placeholder"},
+    )
+    assert personal.status_code == 200, personal.text
+
+    bot = client.post(
+        "/api/v1/channels/telegram/bot",
+        headers=auth_headers(),
+        json={"bot_token": "9876543210:bot-placeholder", "name": "Бот магазина"},
+    )
+
+    assert bot.status_code == 200, bot.text
+    assert bot.json()["type"] == "telegram_bot"
+    assert bot.json()["status"] == "pending"
+    assert bot.json()["settings"]["transport"] == "bot_api"
+    assert bot.json()["settings"]["bot_username"] == "shop_bot"
+    assert bot.json()["settings"]["webhook_path"].startswith(
+        "/api/v1/channels/webhook/telegram_bot/"
+    )
+    listed = client.get("/api/v1/channels", headers=auth_headers())
+    assert {channel["type"] for channel in listed.json()} == {"telegram", "telegram_bot"}
+    assert next(channel for channel in listed.json() if channel["type"] == "telegram")["id"] == personal.json()["id"]
+
+
 def test_disconnect_telegram_channel_clears_credentials_and_preserves_history(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -689,7 +729,15 @@ def test_new_inbound_keeps_escalated_conversation_waiting_for_manager(
     assert [message["sender_type"] for message in thread["messages"]] == [
         "customer",
         "customer",
+        "ai",
     ]
+    handoff_messages = [
+        message
+        for message in thread["messages"]
+        if message["ai_meta"].get("source") == "handoff"
+    ]
+    assert len(handoff_messages) == 1
+    assert "передал ваш вопрос менеджеру" in handoff_messages[0]["text"]
     outbox = asyncio.run(escalation_outbox(session_factory))
     assert len(outbox) == 1
     assert outbox[0].metadata_json["conversation_id"] == conversation_id
@@ -772,7 +820,12 @@ def test_provider_failure_safely_escalates_inbound(
         headers=auth_headers(),
     ).json()
     assert thread["status"] == "escalated"
-    assert thread["messages"][-1]["ai_meta"]["ai_error"] == "LLMProviderRequestError"
+    failed_customer_message = next(
+        message
+        for message in thread["messages"]
+        if message["sender_type"] == "customer"
+    )
+    assert failed_customer_message["ai_meta"]["ai_error"] == "LLMProviderRequestError"
 
 
 def test_telegram_webhook_is_idempotent(
@@ -968,7 +1021,7 @@ def test_telegram_webhook_escalates_without_auto_reply(
 
     assert conversations.status_code == 200
     assert conversations.json()[0]["status"] == "escalated"
-    assert asyncio.run(count_rows(session_factory, Message)) == 1
+    assert asyncio.run(count_rows(session_factory, Message)) == 2
 
 
 def test_escalation_sends_customer_acknowledgement_and_records_reason(

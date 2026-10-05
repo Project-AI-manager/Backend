@@ -317,6 +317,7 @@ def test_qr_account_flow_completes_without_phone_code(
             )
 
     monkeypatch.setattr(telegram_mtproto, "TelegramClient", FakeClient)
+    monkeypatch.setattr(telegram_mtproto, "SessionLocal", session_factory)
     telegram_mtproto._pending_qr_auth.clear()
 
     async def run_flow() -> tuple[object, object, object, Channel]:
@@ -328,7 +329,9 @@ def test_qr_account_flow_completes_without_phone_code(
                 started.channel_id,
             )
             allow_login.set()
-            await asyncio.sleep(0)
+            pending = telegram_mtproto._pending_qr_auth[started.channel_id]
+            assert pending.completion_task is not None
+            await pending.completion_task
             completed = await telegram_mtproto.get_qr_account_connection_status(
                 session,
                 TENANT_ID,

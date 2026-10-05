@@ -20,10 +20,13 @@ from app.schemas.channels import (
     TelegramAccountPasswordRequest,
     TelegramAccountStartRequest,
     TelegramAccountStartResponse,
+    TelegramBotConnectRequest,
     TelegramQRStartResponse,
     TelegramQRStatusResponse,
     VkConnectRequest,
     WhatsAppConnectRequest,
+    WhatsAppPersonalQRStartResponse,
+    WhatsAppPersonalQRStatusResponse,
 )
 from app.services.channels.avito import (
     AVITO_OAUTH_COOKIE,
@@ -42,6 +45,7 @@ from app.services.channels.telegram import (
     list_channels as list_channels_service,
 )
 from app.services.channels.telegram import process_telegram_webhook
+from app.services.channels.telegram import connect_telegram_bot
 from app.services.channels.telegram_mtproto import (
     confirm_account_code,
     confirm_account_password,
@@ -55,6 +59,12 @@ from app.services.channels.whatsapp import (
     probe_whatsapp_channel,
     process_whatsapp_webhook,
     verify_whatsapp_webhook,
+)
+from app.services.channels.whatsapp_personal import (
+    get_personal_qr_status,
+    process_personal_whatsapp_inbound,
+    start_personal_qr,
+    stop_personal_channel,
 )
 
 router = APIRouter()
@@ -161,6 +171,60 @@ async def connect_whatsapp(
     return await connect_whatsapp_channel(session, tenant_id_from_user(user), body)
 
 
+@router.post(
+    "/whatsapp/personal/qr/start",
+    response_model=WhatsAppPersonalQRStartResponse,
+)
+async def start_personal_whatsapp_qr(
+    user: AdminUser,
+    session: SessionDep,
+) -> WhatsAppPersonalQRStartResponse:
+    result = await start_personal_qr(session, tenant_id_from_user(user))
+    return WhatsAppPersonalQRStartResponse.model_validate(result)
+
+
+@router.get(
+    "/whatsapp/personal/qr/{channel_id}/status",
+    response_model=WhatsAppPersonalQRStatusResponse,
+)
+async def personal_whatsapp_qr_status(
+    channel_id: uuid.UUID,
+    user: AdminUser,
+    session: SessionDep,
+) -> WhatsAppPersonalQRStatusResponse:
+    result = await get_personal_qr_status(session, tenant_id_from_user(user), channel_id)
+    return WhatsAppPersonalQRStatusResponse.model_validate(result)
+
+
+@router.delete("/whatsapp/personal/{channel_id}", response_model=ChannelResponse)
+async def disconnect_personal_whatsapp(
+    channel_id: uuid.UUID,
+    user: AdminUser,
+    session: SessionDep,
+) -> ChannelResponse:
+    return await stop_personal_channel(session, tenant_id_from_user(user), channel_id)
+
+
+@router.post(
+    "/webhook/whatsapp/personal",
+    response_model=ChannelWebhookResponse,
+    include_in_schema=False,
+)
+async def personal_whatsapp_inbound(
+    request: Request,
+    session: SessionDep,
+    authorization: Annotated[str | None, Header()] = None,
+) -> ChannelWebhookResponse:
+    bearer_token = authorization.removeprefix("Bearer ") if authorization else None
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid WhatsApp event JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid WhatsApp event payload")
+    return await process_personal_whatsapp_inbound(session, bearer_token, payload)
+
+
 @router.post("/whatsapp/{channel_id}/probe", response_model=ChannelProbeResponse)
 async def probe_whatsapp(
     channel_id: uuid.UUID,
@@ -251,6 +315,15 @@ async def confirm_telegram_password(
     )
 
 
+@router.post("/telegram/bot", response_model=ChannelResponse)
+async def connect_telegram_bot_channel(
+    body: TelegramBotConnectRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> ChannelResponse:
+    return await connect_telegram_bot(session, tenant_id_from_user(user), body)
+
+
 @router.get("", response_model=list[ChannelResponse])
 async def list_channels(user: AdminUser, session: SessionDep) -> list[ChannelResponse]:
     return await list_channels_service(session, tenant_id_from_user(user))
@@ -316,6 +389,8 @@ async def _process_webhook(
     session: SessionDep,
 ) -> ChannelWebhookResponse:
     payload: dict[str, Any] = await request.json()
-    if channel_type != "telegram":
+    if channel_type not in {"telegram", "telegram_bot"}:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unsupported webhook channel")
-    return await process_telegram_webhook(session, payload, webhook_secret=webhook_secret)
+    return await process_telegram_webhook(
+        session, payload, webhook_secret=webhook_secret, channel_type=channel_type
+    )

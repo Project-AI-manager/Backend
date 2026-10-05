@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     TELEGRAM_API_HASH: str = ""
     WHATSAPP_GRAPH_BASE_URL: str = "https://graph.facebook.com"
     WHATSAPP_DELIVERY_TIMEOUT_SEC: float = 8.0
+    WHATSAPP_PERSONAL_BRIDGE_URL: str = "http://127.0.0.1:8092"
+    WHATSAPP_PERSONAL_BRIDGE_TOKEN: str = ""
+    WHATSAPP_PERSONAL_CALLBACK_TOKEN: str = ""
+    WHATSAPP_PERSONAL_CALLBACK_URL: str = "http://127.0.0.1:8000/api/v1/channels/webhook/whatsapp/personal"
     AVITO_API_BASE_URL: str = "https://api.avito.ru"
     AVITO_OAUTH_AUTHORIZE_URL: str = "https://avito.ru/oauth"
     AVITO_CLIENT_ID: str = ""
@@ -99,7 +103,7 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
-        production_frontends = [
+        known_frontends = [
             "https://frontend-nine-mu-rjbjzqe6rq.vercel.app",
             "https://frontend-timurzakirov239s-projects.vercel.app",
             "https://frontend-git-main-timurzakirov239s-projects.vercel.app",
@@ -107,7 +111,11 @@ class Settings(BaseSettings):
             "https://xn--80aesmncewf.space",
             "https://www.xn--80aesmncewf.space",
         ]
-        for origin in production_frontends:
+        if self.is_local_or_test:
+            known_frontends.extend(
+                ["http://localhost:3000", "http://127.0.0.1:3000"]
+            )
+        for origin in known_frontends:
             if origin not in origins:
                 origins.append(origin)
         return origins

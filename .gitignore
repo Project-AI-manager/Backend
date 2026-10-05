@@ -26,4 +26,6 @@ htmlcov/
 
 # Data / local
 *.sqlite3
+data/whatsapp-personal/
+whatsapp-bridge/data/
 .DS_Store

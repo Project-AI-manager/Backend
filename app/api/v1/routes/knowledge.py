@@ -114,6 +114,7 @@ async def upload_document_file(
             session,
             tenant_id,
             body,
+            require_vector_index=True,
         )
     except KnowledgeIndexingError as exc:
         raise HTTPException(
@@ -141,7 +142,17 @@ async def archive_document(
     user: CurrentUser,
     session: SessionDep,
 ) -> KnowledgeDocumentStatusResponse:
-    return await archive_kb_document(session, tenant_id_from_user(user), document_id)
+    try:
+        return await archive_kb_document(session, tenant_id_from_user(user), document_id)
+    except KnowledgeIndexingError as exc:
+        raise HTTPException(
+            503,
+            {
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.post("/ask", response_model=MLAnswerResponse)

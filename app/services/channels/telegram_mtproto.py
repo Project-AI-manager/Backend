@@ -29,6 +29,7 @@ from telethon.tl.types import InputDialogPeer, InputPeerUser  # type: ignore[imp
 
 from app.core.config import settings
 from app.core.secrets import decrypt_secret, encrypt_secret
+from app.db.session import SessionLocal
 from app.models.channel import Channel
 from app.models.conversation import Conversation, Customer, CustomerIdentity, Message
 from app.schemas.channels import (
@@ -58,6 +59,7 @@ class PendingTelegramAuth:
 class PendingTelegramQRAuth:
     client: TelegramClient
     login_task: asyncio.Task[object]
+    completion_task: asyncio.Task[None] | None = None
 
 
 _pending_auth: dict[UUID, PendingTelegramAuth] = {}
@@ -79,6 +81,8 @@ async def cancel_pending_account_connection(channel_id: UUID) -> None:
         await pending.client.disconnect()
     qr_pending = _pending_qr_auth.pop(channel_id, None)
     if qr_pending is not None:
+        if qr_pending.completion_task is not None and not qr_pending.completion_task.done():
+            qr_pending.completion_task.cancel()
         if not qr_pending.login_task.done():
             qr_pending.login_task.cancel()
         await qr_pending.client.disconnect()
@@ -218,9 +222,13 @@ async def start_qr_account_connection(
             "Telegram QR authorization could not be started",
         ) from exc
 
-    _pending_qr_auth[channel.id] = PendingTelegramQRAuth(
+    pending = PendingTelegramQRAuth(
         client=client,
         login_task=asyncio.create_task(qr_login.wait()),
+    )
+    _pending_qr_auth[channel.id] = pending
+    pending.completion_task = asyncio.create_task(
+        _finish_qr_login(channel.id, tenant_id, pending)
     )
     channel.status = "disabled"
     channel.settings = {
@@ -251,41 +259,135 @@ async def get_qr_account_connection_status(
                 status="active",
                 display_name=channel.name,
             )
-        raise HTTPException(status.HTTP_409_CONFLICT, "Telegram QR authorization expired")
+        auth_status = str((channel.settings or {}).get("auth_status") or "")
+        if auth_status == "password_required":
+            return TelegramQRStatusResponse(
+                channel_id=channel.id,
+                status="password_required",
+            )
+        if auth_status == "qr_waiting":
+            raw_expiry = str((channel.settings or {}).get("qr_expires_at") or "")
+            try:
+                expires_at = datetime.fromisoformat(raw_expiry)
+            except ValueError:
+                expires_at = datetime.min.replace(tzinfo=UTC)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at > datetime.now(UTC):
+                # A different worker may own the live Telethon client. Keep
+                # polling until its QR expires instead of failing early.
+                return TelegramQRStatusResponse(channel_id=channel.id, status="waiting")
+            channel.settings = {**channel.settings, "auth_status": "qr_expired"}
+            await session.commit()
+        return TelegramQRStatusResponse(channel_id=channel.id, status="expired")
 
-    await asyncio.sleep(0)
-    if not pending.login_task.done():
-        return TelegramQRStatusResponse(channel_id=channel.id, status="waiting")
-
-    try:
-        pending.login_task.result()
-    except SessionPasswordNeededError:
-        channel.settings = {**channel.settings, "auth_status": "password_required"}
-        await session.commit()
+    if channel.status == "active":
         return TelegramQRStatusResponse(
             channel_id=channel.id,
-            status="password_required",
+            status="active",
+            display_name=channel.name,
         )
-    except TimeoutError:
-        _pending_qr_auth.pop(channel.id, None)
-        await pending.client.disconnect()
-        channel.settings = {**channel.settings, "auth_status": "qr_expired"}
-        await session.commit()
-        return TelegramQRStatusResponse(channel_id=channel.id, status="expired")
-    except Exception as exc:
-        _pending_qr_auth.pop(channel.id, None)
-        await pending.client.disconnect()
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Telegram QR authorization failed",
-        ) from exc
+    if (channel.settings or {}).get("auth_status") == "password_required":
+        return TelegramQRStatusResponse(channel_id=channel.id, status="password_required")
+    if pending.completion_task is None or not pending.completion_task.done():
+        return TelegramQRStatusResponse(channel_id=channel.id, status="waiting")
+    await pending.completion_task
+    await session.refresh(channel)
+    if channel.status == "active":
+        return TelegramQRStatusResponse(
+            channel_id=channel.id,
+            status="active",
+            display_name=channel.name,
+        )
+    if (channel.settings or {}).get("auth_status") == "password_required":
+        return TelegramQRStatusResponse(channel_id=channel.id, status="password_required")
+    return TelegramQRStatusResponse(channel_id=channel.id, status="expired")
 
-    auth = await _complete_auth(session, channel, pending.client)
-    return TelegramQRStatusResponse(
-        channel_id=auth.channel_id,
-        status="active",
-        display_name=auth.display_name,
-    )
+
+async def _finish_qr_login(
+    channel_id: UUID,
+    tenant_id: UUID,
+    pending: PendingTelegramQRAuth,
+) -> None:
+    """Persist a successful QR login even if the browser stops polling."""
+    try:
+        await pending.login_task
+    except SessionPasswordNeededError:
+        async with SessionLocal() as session:
+            channel = await session.get(Channel, channel_id)
+            if (
+                channel is not None
+                and channel.tenant_id == tenant_id
+                and _pending_qr_auth.get(channel_id) is pending
+            ):
+                channel.settings = {
+                    **(channel.settings or {}),
+                    "auth_status": "password_required",
+                }
+                await session.commit()
+        return
+    except TimeoutError:
+        await _persist_qr_terminal_state(channel_id, tenant_id, pending, "qr_expired")
+        await _discard_pending_qr(channel_id, pending)
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "telegram_qr_authorization_failed",
+            extra={"channel_id": str(channel_id), "error_type": type(exc).__name__},
+        )
+        await _persist_qr_terminal_state(channel_id, tenant_id, pending, "qr_error")
+        await _discard_pending_qr(channel_id, pending)
+        return
+
+    try:
+        async with SessionLocal() as session:
+            channel = await session.get(Channel, channel_id)
+            if (
+                channel is None
+                or channel.tenant_id != tenant_id
+                or _pending_qr_auth.get(channel_id) is not pending
+            ):
+                return
+            await _complete_auth(session, channel, pending.client)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "telegram_qr_session_persistence_failed",
+            extra={"channel_id": str(channel_id), "error_type": type(exc).__name__},
+        )
+        await _persist_qr_terminal_state(channel_id, tenant_id, pending, "qr_error")
+        await _discard_pending_qr(channel_id, pending)
+
+
+async def _persist_qr_terminal_state(
+    channel_id: UUID,
+    tenant_id: UUID,
+    pending: PendingTelegramQRAuth,
+    auth_status: str,
+) -> None:
+    async with SessionLocal() as session:
+        channel = await session.get(Channel, channel_id)
+        if (
+            channel is None
+            or channel.tenant_id != tenant_id
+            or _pending_qr_auth.get(channel_id) is not pending
+        ):
+            return
+        channel.status = "disabled"
+        channel.settings = {**(channel.settings or {}), "auth_status": auth_status}
+        await session.commit()
+
+
+async def _discard_pending_qr(
+    channel_id: UUID,
+    pending: PendingTelegramQRAuth,
+) -> None:
+    if _pending_qr_auth.get(channel_id) is pending:
+        _pending_qr_auth.pop(channel_id, None)
+    await pending.client.disconnect()
 
 
 async def confirm_account_code(
@@ -321,13 +423,15 @@ async def confirm_account_password(
 ) -> TelegramAccountAuthResponse:
     channel = await _owned_channel(session, tenant_id, channel_id)
     pending = _pending_auth.get(channel.id)
-    if pending is None:
+    qr_pending = _pending_qr_auth.get(channel.id)
+    client = pending.client if pending is not None else qr_pending.client if qr_pending else None
+    if client is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Telegram authorization must be restarted")
     try:
-        await pending.client.sign_in(password=password)
+        await client.sign_in(password=password)
     except Exception as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Telegram 2FA password") from exc
-    return await _complete_auth(session, channel, pending.client)
+    return await _complete_auth(session, channel, client)
 
 
 async def _complete_auth(
